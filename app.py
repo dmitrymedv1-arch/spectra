@@ -879,18 +879,16 @@ elif st.session_state.current_step == 4:
             # Компоненты
             colors = plt.cm.Set3(np.linspace(0, 1, len(st.session_state.deconvolver.components)))
             for c, color in zip(st.session_state.deconvolver.components, colors):
-                color_hex = '#{:02x}{:02x}{:02x}'.format(
-                    int(color[0]*255), int(color[1]*255), int(color[2]*255)
-                )
+                # Используем RGBA формат с прозрачностью
+                rgba_color = f'rgba({int(color[0]*255)}, {int(color[1]*255)}, {int(color[2]*255)}, 0.3)'
                 fig.add_trace(
                     go.Scatter(x=st.session_state.deconvolver.x, 
                               y=c['y_norm'],
                               mode='lines',
                               name=f'Пик {c["id"]} ({c["fraction_percent"]:.1f}%)',
-                              line=dict(color=color_hex, width=1.5),
+                              line=dict(color=f'rgb({int(color[0]*255)}, {int(color[1]*255)}, {int(color[2]*255)})', width=1.5),
                               fill='tozeroy',
-                              fillcolor=color_hex,
-                              fillopacity=0.3,
+                              fillcolor=rgba_color),  # Используем RGBA с прозрачностью
                     row=1, col=1
                 )
             
@@ -1159,3 +1157,4 @@ ID    Центр           Амплитуда       FWHM        Площадь  
                 st.session_state.current_step = 1
 
                 st.rerun()
+
