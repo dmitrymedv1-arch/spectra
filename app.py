@@ -862,7 +862,7 @@ class DeconvolutionPlotter:
             # Add quality metrics to residuals plot
             r2 = deconvolver.quality_metrics.get('R²', 0)
             rmse = deconvolver.quality_metrics.get('RMSE', 0)
-            ax_res.text(0.02, 0.95, f'R² = {r2:.6f}\nRMSE = {rmse:.2e}',
+            ax_res.text(0.02, 0.95, f'R^2 = {r2:.6f}\nRMSE = {rmse:.2e}',
                        transform=ax_res.transAxes, fontsize=9,
                        verticalalignment='top',
                        bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
@@ -1434,7 +1434,7 @@ def render_step_4_editing(state: AppState):
             col_m1, col_m2, col_m3, col_m4 = st.columns(4)
             metrics = state.deconvolver.quality_metrics
             with col_m1:
-                st.metric("R²", f"{metrics.get('R²', 0):.6f}")
+                st.metric("R^2", f"{metrics.get('R²', 0):.6f}")
             with col_m2:
                 st.metric("RMSE", f"{metrics.get('RMSE', 0):.2e}")
             with col_m3:
@@ -1553,7 +1553,7 @@ def render_step_5_results(state: AppState):
             col1, col2, col3, col4 = st.columns(4)
             
             with col1:
-                st.metric("R²", f"{metrics.get('R²', 0):.6f}")
+                st.metric("R^2", f"{metrics.get('R²', 0):.6f}")
             with col2:
                 st.metric("AIC", f"{metrics.get('AIC', 0):.2f}")
             with col3:
@@ -1846,3 +1846,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
