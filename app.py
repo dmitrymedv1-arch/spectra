@@ -242,7 +242,6 @@ class FitQualityAnalyzer:
         
         return dw < 1.5 or dw > 2.5
 
-
 class GaussianDeconvolver:
     """Class for spectral deconvolution"""
     
@@ -482,7 +481,249 @@ class GaussianDeconvolver:
                 new_params.extend([c['amp_norm'], c['cen_log'], c['sigma_log']])
         
         return self.fit(initial_params=new_params)
-
+    
+    def create_scientific_plotly_figure(self):
+        """Create a Plotly figure with scientific styling"""
+        fig = make_subplots(
+            rows=2, cols=2,
+            subplot_titles=('Deconvolution', 'Residuals', 'Components', 'Metrics'),
+            specs=[[{'type': 'scatter'}, {'type': 'scatter'}],
+                   [{'type': 'bar'}, {'type': 'table'}]]
+        )
+        
+        # Scientific styling for Plotly
+        plotly_template = {
+            'layout': {
+                'font': {'family': 'serif', 'size': 12},
+                'title': {'font': {'family': 'serif', 'size': 14, 'weight': 'bold'}},
+                'xaxis': {
+                    'title': {'font': {'family': 'serif', 'size': 13, 'weight': 'bold'}},
+                    'tickfont': {'family': 'serif', 'size': 11},
+                    'showline': True,
+                    'linewidth': 1,
+                    'linecolor': 'black',
+                    'mirror': True,
+                    'ticks': 'outside',
+                    'tickwidth': 1,
+                    'ticklen': 5,
+                    'showgrid': True,
+                    'gridwidth': 0.5,
+                    'gridcolor': 'lightgray'
+                },
+                'yaxis': {
+                    'title': {'font': {'family': 'serif', 'size': 13, 'weight': 'bold'}},
+                    'tickfont': {'family': 'serif', 'size': 11},
+                    'showline': True,
+                    'linewidth': 1,
+                    'linecolor': 'black',
+                    'mirror': True,
+                    'ticks': 'outside',
+                    'tickwidth': 1,
+                    'ticklen': 5,
+                    'showgrid': True,
+                    'gridwidth': 0.5,
+                    'gridcolor': 'lightgray'
+                },
+                'legend': {
+                    'font': {'family': 'serif', 'size': 11},
+                    'borderwidth': 1,
+                    'bordercolor': 'black'
+                },
+                'plot_bgcolor': 'white',
+                'paper_bgcolor': 'white'
+            }
+        }
+        
+        # Main plot
+        fig.add_trace(
+            go.Scatter(x=self.x, y=self.y_norm,
+                      mode='markers+lines',
+                      name='Data',
+                      marker=dict(size=4, color='black', symbol='circle'),
+                      line=dict(color='black', width=1)),
+            row=1, col=1
+        )
+        
+        fig.add_trace(
+            go.Scatter(x=self.x, y=self.fit_y_norm,
+                      mode='lines',
+                      name='Total Fit',
+                      line=dict(color='red', width=2, dash='solid')),
+            row=1, col=1
+        )
+        
+        # Components
+        colors = plt.cm.Set3(np.linspace(0, 1, len(self.components)))
+        for c, color in zip(self.components, colors):
+            rgb_color = f'rgb({int(color[0]*255)}, {int(color[1]*255)}, {int(color[2]*255)})'
+            rgba_color = f'rgba({int(color[0]*255)}, {int(color[1]*255)}, {int(color[2]*255)}, 0.2)'
+            
+            fig.add_trace(
+                go.Scatter(x=self.x, y=c['y_norm'],
+                          mode='lines',
+                          name=f'Peak {c["id"]} ({c["fraction_percent"]:.1f}%)',
+                          line=dict(color=rgb_color, width=1.5),
+                          fill='tozeroy',
+                          fillcolor=rgba_color),
+                row=1, col=1
+            )
+        
+        # Residuals
+        if 'Residuals' in self.quality_metrics:
+            residuals = self.quality_metrics['Residuals']
+            fig.add_trace(
+                go.Scatter(x=self.x, y=residuals,
+                          mode='lines+markers',
+                          name='Residuals',
+                          marker=dict(size=3, color='blue', symbol='circle'),
+                          line=dict(color='blue', width=1)),
+                row=1, col=2
+            )
+            fig.add_hline(y=0, line_dash="dash", line_color="red", 
+                         line_width=1, row=1, col=2)
+        
+        # Bar chart of components
+        centers = [f"Peak {c['id']}" for c in self.components]
+        fractions = [c['fraction_percent'] for c in self.components]
+        
+        fig.add_trace(
+            go.Bar(x=centers, y=fractions,
+                  name='Fractions (%)',
+                  marker_color='steelblue',
+                  marker_line_color='black',
+                  marker_line_width=1,
+                  opacity=0.8),
+            row=2, col=1
+        )
+        
+        # Metrics table
+        metrics = self.quality_metrics
+        metrics_table = go.Table(
+            header=dict(
+                values=['Metric', 'Value'],
+                fill_color='lightgray',
+                align='center',
+                font=dict(family='serif', size=12, color='black'),
+                line=dict(color='black', width=1)
+            ),
+            cells=dict(
+                values=[
+                    ['R²', 'AIC', 'BIC', 'χ²', 'RMSE'],
+                    [f"{metrics.get('R²', 0):.6f}", 
+                     f"{metrics.get('AIC', 0):.2f}",
+                     f"{metrics.get('BIC', 0):.2f}",
+                     f"{metrics.get('χ²', 0):.2e}",
+                     f"{metrics.get('RMSE', 0):.2e}"]
+                ],
+                fill_color='white',
+                align='center',
+                font=dict(family='serif', size=11),
+                line=dict(color='black', width=1)
+            )
+        )
+        fig.add_trace(metrics_table, row=2, col=2)
+        
+        # Update layout with scientific styling
+        fig.update_layout(
+            height=700,
+            showlegend=True,
+            title_text="",
+            font=dict(family='serif', size=12),
+            legend=dict(
+                bgcolor='white',
+                bordercolor='black',
+                borderwidth=1,
+                font=dict(family='serif', size=10)
+            )
+        )
+        
+        # Update axes
+        fig.update_xaxes(
+            title_text=self.x_label,
+            title_font=dict(family='serif', size=13, weight='bold'),
+            tickfont=dict(family='serif', size=11),
+            showline=True,
+            linewidth=1,
+            linecolor='black',
+            mirror=True,
+            ticks='outside',
+            tickwidth=1,
+            ticklen=5,
+            showgrid=True,
+            gridwidth=0.5,
+            gridcolor='lightgray',
+            row=1, col=1
+        )
+        
+        fig.update_xaxes(
+            title_text=self.x_label,
+            title_font=dict(family='serif', size=13, weight='bold'),
+            tickfont=dict(family='serif', size=11),
+            showline=True,
+            linewidth=1,
+            linecolor='black',
+            mirror=True,
+            ticks='outside',
+            tickwidth=1,
+            ticklen=5,
+            showgrid=True,
+            gridwidth=0.5,
+            gridcolor='lightgray',
+            row=1, col=2
+        )
+        
+        fig.update_yaxes(
+            title_text="Normalized Y",
+            title_font=dict(family='serif', size=13, weight='bold'),
+            tickfont=dict(family='serif', size=11),
+            showline=True,
+            linewidth=1,
+            linecolor='black',
+            mirror=True,
+            ticks='outside',
+            tickwidth=1,
+            ticklen=5,
+            showgrid=True,
+            gridwidth=0.5,
+            gridcolor='lightgray',
+            row=1, col=1
+        )
+        
+        fig.update_yaxes(
+            title_text="Residuals",
+            title_font=dict(family='serif', size=13, weight='bold'),
+            tickfont=dict(family='serif', size=11),
+            showline=True,
+            linewidth=1,
+            linecolor='black',
+            mirror=True,
+            ticks='outside',
+            tickwidth=1,
+            ticklen=5,
+            showgrid=True,
+            gridwidth=0.5,
+            gridcolor='lightgray',
+            row=1, col=2
+        )
+        
+        fig.update_yaxes(
+            title_text="Fraction (%)",
+            title_font=dict(family='serif', size=13, weight='bold'),
+            tickfont=dict(family='serif', size=11),
+            showline=True,
+            linewidth=1,
+            linecolor='black',
+            mirror=True,
+            ticks='outside',
+            tickwidth=1,
+            ticklen=5,
+            showgrid=True,
+            gridwidth=0.5,
+            gridcolor='lightgray',
+            row=2, col=1
+        )
+        
+        return fig
 
 # ==================== DEFAULT DATA ====================
 
@@ -895,7 +1136,6 @@ elif st.session_state.current_step == 3:
                 df = pd.DataFrame(data)
                 st.dataframe(df, use_container_width=True)
 
-
 # ==================== STEP 4: EDITING ====================
 
 elif st.session_state.current_step == 4:
@@ -964,101 +1204,9 @@ elif st.session_state.current_step == 4:
         with col2:
             st.subheader("Current Deconvolution")
             
-            # Create interactive Plotly graph
-            fig = make_subplots(
-                rows=2, cols=2,
-                subplot_titles=('Deconvolution', 'Residuals', 'Components', 'Metrics'),
-                specs=[[{'type': 'scatter'}, {'type': 'scatter'}],
-                       [{'type': 'bar'}, {'type': 'table'}]]
-            )
-            
-            # Main plot
-            fig.add_trace(
-                go.Scatter(x=st.session_state.deconvolver.x, 
-                          y=st.session_state.deconvolver.y_norm,
-                          mode='markers+lines',
-                          name='Data',
-                          marker=dict(size=4, color='black')),
-                row=1, col=1
-            )
-            
-            fig.add_trace(
-                go.Scatter(x=st.session_state.deconvolver.x, 
-                          y=st.session_state.deconvolver.fit_y_norm,
-                          mode='lines',
-                          name='Total Fit',
-                          line=dict(color='red', width=2)),
-                row=1, col=1
-            )
-            
-            # Components
-            colors = plt.cm.Set3(np.linspace(0, 1, len(st.session_state.deconvolver.components)))
-            for c, color in zip(st.session_state.deconvolver.components, colors):
-                rgba_color = f'rgba({int(color[0]*255)}, {int(color[1]*255)}, {int(color[2]*255)}, 0.3)'
-                fig.add_trace(
-                    go.Scatter(x=st.session_state.deconvolver.x, 
-                              y=c['y_norm'],
-                              mode='lines',
-                              name=f'Peak {c["id"]} ({c["fraction_percent"]:.1f}%)',
-                              line=dict(color=f'rgb({int(color[0]*255)}, {int(color[1]*255)}, {int(color[2]*255)})', width=1.5),
-                              fill='tozeroy',
-                              fillcolor=rgba_color),
-                    row=1, col=1
-                )
-            
-            # Residuals
-            if 'Residuals' in st.session_state.deconvolver.quality_metrics:
-                residuals = st.session_state.deconvolver.quality_metrics['Residuals']
-                fig.add_trace(
-                    go.Scatter(x=st.session_state.deconvolver.x, 
-                              y=residuals,
-                              mode='lines',
-                              name='Residuals',
-                              line=dict(color='blue', width=1)),
-                    row=1, col=2
-                )
-                fig.add_hline(y=0, line_dash="dash", line_color="red", row=1, col=2)
-            
-            # Histogram of components
-            centers = [f"Peak {c['id']}" for c in st.session_state.deconvolver.components]
-            fractions = [c['fraction_percent'] for c in st.session_state.deconvolver.components]
-            
-            fig.add_trace(
-                go.Bar(x=centers, 
-                      y=fractions,
-                      name='Fractions (%)',
-                      marker_color='steelblue'),
-                row=2, col=1
-            )
-            
-            # Metrics table
-            metrics = st.session_state.deconvolver.quality_metrics
-            metrics_table = go.Table(
-                header=dict(values=['Metric', 'Value'],
-                           fill_color='paleturquoise',
-                           align='left'),
-                cells=dict(values=[
-                    ['R²', 'AIC', 'BIC', 'χ²', 'RMSE'],
-                    [f"{metrics.get('R²', 0):.6f}", 
-                     f"{metrics.get('AIC', 0):.2f}",
-                     f"{metrics.get('BIC', 0):.2f}",
-                     f"{metrics.get('χ²', 0):.2e}",
-                     f"{metrics.get('RMSE', 0):.2e}"]
-                ],
-                fill_color='lavender',
-                align='left')
-            )
-            fig.add_trace(metrics_table, row=2, col=2)
-            
-            fig.update_layout(height=700, showlegend=True, title_text="")
-            fig.update_xaxes(title_text=st.session_state.deconvolver.x_label, row=1, col=1)
-            fig.update_xaxes(title_text=st.session_state.deconvolver.x_label, row=1, col=2)
-            fig.update_yaxes(title_text="Normalized Y", row=1, col=1)
-            fig.update_yaxes(title_text="Residuals", row=1, col=2)
-            fig.update_yaxes(title_text="Fraction (%)", row=2, col=1)
-            
+            # Use the new scientific Plotly figure
+            fig = st.session_state.deconvolver.create_scientific_plotly_figure()
             st.plotly_chart(fig, use_container_width=True)
-
 
 # ==================== STEP 5: RESULTS ====================
 
@@ -1066,6 +1214,15 @@ elif st.session_state.current_step == 5:
     st.header("Step 5: Results")
     
     if st.session_state.deconvolver and st.session_state.deconvolver.components:
+        
+        # Back button at the top
+        col_back, _ = st.columns([1, 5])
+        with col_back:
+            if st.button("⬅️ Back to Editing", use_container_width=True):
+                st.session_state.current_step = 4
+                st.rerun()
+        
+        st.markdown("---")
         
         # Create tabs for results
         tab1, tab2, tab3 = st.tabs(["📊 Graphs", "📋 Table", "📈 Export"])
@@ -1103,11 +1260,20 @@ elif st.session_state.current_step == 5:
                 y_total = GaussianModel.multi_gaussian(x_dense_log, *st.session_state.deconvolver.popt) * st.session_state.deconvolver.y_max
                 ax.plot(x_dense, y_total, 'r--', linewidth=2, label='Total Fit')
                 
-                ax.set_xlabel('X')
-                ax.set_ylabel('Y')
-                ax.set_title('Deconvolution Result')
-                ax.legend(loc='upper right', fontsize=8)
+                ax.set_xlabel('X', fontweight='bold')
+                ax.set_ylabel('Y', fontweight='bold')
+                ax.set_title('Deconvolution Result', fontweight='bold')
+                ax.legend(loc='upper right', fontsize=8, frameon=True, edgecolor='black')
                 ax.grid(True, alpha=0.3)
+                
+                # Scientific styling
+                ax.spines['top'].set_visible(True)
+                ax.spines['right'].set_visible(True)
+                ax.spines['bottom'].set_linewidth(1)
+                ax.spines['left'].set_linewidth(1)
+                ax.spines['top'].set_linewidth(1)
+                ax.spines['right'].set_linewidth(1)
+                ax.tick_params(direction='out', length=4, width=1)
                 
                 st.pyplot(fig)
                 plt.close()
@@ -1122,8 +1288,9 @@ elif st.session_state.current_step == 5:
                 fractions = [c['fraction_percent'] for c in st.session_state.deconvolver.components]
                 colors = plt.cm.Set3(np.linspace(0, 1, len(peaks)))
                 ax1.pie(fractions, labels=peaks, autopct='%1.1f%%',
-                       colors=colors, startangle=90)
-                ax1.set_title('Area Distribution')
+                       colors=colors, startangle=90,
+                       textprops={'fontweight': 'bold'})
+                ax1.set_title('Area Distribution', fontweight='bold')
                 
                 # Bar chart
                 centers = [c['cen_linear'] for c in st.session_state.deconvolver.components]
@@ -1132,13 +1299,23 @@ elif st.session_state.current_step == 5:
                 if st.session_state.deconvolver.use_log_x:
                     ax2.set_xscale('log')
                 
-                ax2.bar(range(len(centers)), areas, 
-                       tick_label=[f'{c:.2e}' for c in centers],
-                       color='steelblue', edgecolor='black', alpha=0.7)
-                ax2.set_xlabel('Peak Center')
-                ax2.set_ylabel('Area')
-                ax2.set_title('Peak Areas')
+                bars = ax2.bar(range(len(centers)), areas, 
+                              tick_label=[f'{c:.2e}' for c in centers],
+                              color='steelblue', edgecolor='black', alpha=0.7)
+                ax2.set_xlabel('Peak Center', fontweight='bold')
+                ax2.set_ylabel('Area', fontweight='bold')
+                ax2.set_title('Peak Areas', fontweight='bold')
                 ax2.tick_params(axis='x', rotation=45)
+                
+                # Scientific styling for bar chart
+                ax2.spines['top'].set_visible(True)
+                ax2.spines['right'].set_visible(True)
+                ax2.spines['bottom'].set_linewidth(1)
+                ax2.spines['left'].set_linewidth(1)
+                ax2.spines['top'].set_linewidth(1)
+                ax2.spines['right'].set_linewidth(1)
+                ax2.tick_params(direction='out', length=4, width=1)
+                ax2.grid(True, alpha=0.3, axis='y')
                 
                 plt.tight_layout()
                 st.pyplot(fig)
@@ -1266,14 +1443,9 @@ ID    Center          Amplitude       FWHM        Area           Fraction(%)
             
             col_a, col_b = st.columns(2)
             with col_a:
-                if st.button("⬅️ Back to Editing", use_container_width=True):
-                    st.session_state.current_step = 4
-                    st.rerun()
-            with col_b:
                 if st.button("🔄 New Analysis", use_container_width=True):
                     for key in ['deconvolver', 'raw_x', 'raw_y', 'peak_info', 'derivatives', 'split_position']:
                         if key in st.session_state:
                             st.session_state[key] = None
                     st.session_state.current_step = 1
                     st.rerun()
-
