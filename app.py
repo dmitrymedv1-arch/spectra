@@ -1049,7 +1049,6 @@ elif st.session_state.current_step == 2:
         st.pyplot(fig)
         plt.close()
 
-
 # ==================== STEP 3: PEAK DETECTION ====================
 
 elif st.session_state.current_step == 3:
@@ -1114,73 +1113,67 @@ elif st.session_state.current_step == 3:
             st.subheader(f"Peaks found: {len(st.session_state.peak_info)}")
             
             dy, d2y, y_smooth = st.session_state.derivatives
+            deconv = st.session_state.deconvolver
             
             # Create tabs for different plots
             tab1, tab2, tab3 = st.tabs(["📊 Peaks", "📈 Derivatives", "📋 Information"])
 
             with tab1:
-                fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+                # Create a figure with the EXACT same appearance as in Step 2
+                fig, ax = plt.subplots(figsize=(10, 6))
                 
-                # Получаем данные из deconvolver
-                deconv = st.session_state.deconvolver
-                
-                # График 1: В том же масштабе, что был выбран на шаге 2
+                # Apply the same scale settings as in Step 2
                 if deconv.use_log_x:
-                    ax1.set_xscale('log')
+                    ax.set_xscale('log')
                 if deconv.use_log_y:
-                    ax1.set_yscale('log')
+                    ax.set_yscale('log')
                 
-                # Данные для первого графика - используем оригинальные значения, 
-                # но с правильным масштабом осей
-                ax1.plot(deconv.x_linear, deconv.y_original, 
-                         'o-', markersize=3, alpha=0.5, label='Data', color='black')
+                # Plot original data exactly as in Step 2 - NO NORMALIZATION
+                ax.plot(deconv.x_linear, deconv.y_original, 
+                       'o-', markersize=3, linewidth=1, alpha=0.7, 
+                       label='Original Data', color='black')
                 
-                # Сглаженные данные - преобразуем обратно в оригинальный масштаб
-                y_smooth_original = st.session_state.derivatives[2] * deconv.y_max
-                ax1.plot(deconv.x_linear, y_smooth_original, 
-                         'r-', linewidth=2, label='Smoothed')
+                # Plot smoothed data in the same scale
+                # IMPORTANT: y_smooth is normalized, so we need to denormalize it
+                # to match the original Y scale
+                y_smooth_original = y_smooth * deconv.y_max
+                ax.plot(deconv.x_linear, y_smooth_original, 
+                       'r-', linewidth=2, label='Smoothed', color='red')
                 
-                # Отмечаем найденные пики
+                # Mark detected peaks
                 for i, info in enumerate(st.session_state.peak_info):
-                    # Для пиков используем оригинальные координаты
-                    ax1.plot(info['x_linear'], 
-                             info['y'] * deconv.y_max, 
-                             'ro', markersize=8, markeredgecolor='darkred')
-                    ax1.text(info['x_linear'], 
-                            info['y'] * deconv.y_max * 1.05, 
-                            f'{i+1}', ha='center', fontweight='bold')
+                    # Denormalize the Y value to match original scale
+                    peak_y_original = info['y'] * deconv.y_max
+                    ax.plot(info['x_linear'], peak_y_original, 
+                           'ro', markersize=8, markeredgecolor='darkred', 
+                           markerfacecolor='yellow')
+                    ax.text(info['x_linear'], peak_y_original * 1.05, 
+                           f'{i+1}', ha='center', fontweight='bold', 
+                           fontsize=12, bbox=dict(boxstyle="round,pad=0.3", 
+                                                 facecolor='white', alpha=0.8))
                 
-                # Подписи осей с учетом выбранного масштаба
+                # Set labels exactly as in Step 2
                 x_label = 'X'
                 if deconv.use_log_x:
-                    x_label += ' (log scale)'
+                    x_label = 'X (log scale)'
                 y_label = 'Y'
                 if deconv.use_log_y:
-                    y_label += ' (log scale)'
+                    y_label = 'Y (log scale)'
                 
-                ax1.set_xlabel(x_label)
-                ax1.set_ylabel(y_label)
-                ax1.set_title(f'Same scale as Step 2: {x_label}, {y_label}')
-                ax1.legend()
-                ax1.grid(True, alpha=0.3)
+                ax.set_xlabel(x_label, fontsize=12, fontweight='bold')
+                ax.set_ylabel(y_label, fontsize=12, fontweight='bold')
+                ax.set_title('Peak Detection - Same View as Step 2', fontsize=14, fontweight='bold')
+                ax.legend(loc='best', fontsize=10, frameon=True, edgecolor='black')
+                ax.grid(True, alpha=0.3, linestyle='--')
                 
-                # График 2: Преобразованные данные (логарифмические координаты, если применимо)
-                ax2.plot(deconv.x, deconv.y_norm * deconv.y_max, 
-                         'o-', markersize=3, alpha=0.5, label='Data', color='black')
-                ax2.plot(deconv.x, st.session_state.derivatives[2] * deconv.y_max, 
-                         'r-', linewidth=2, label='Smoothed')
-                
-                for i, info in enumerate(st.session_state.peak_info):
-                    ax2.plot(info['x'], info['y'] * deconv.y_max, 
-                            'ro', markersize=8, markeredgecolor='darkred')
-                    ax2.text(info['x'], info['y'] * deconv.y_max * 1.05, 
-                            f'{i+1}', ha='center', fontweight='bold')
-                
-                ax2.set_xlabel(deconv.x_label)  # Это будет 'log₁₀(X)' если use_log_x=True
-                ax2.set_ylabel(deconv.y_label)  # Это будет 'log₁₀(Y)' если use_log_y=True
-                ax2.set_title('Transformed coordinates (for fitting)')
-                ax2.grid(True, alpha=0.3)
-                ax2.legend()
+                # Scientific styling
+                ax.spines['top'].set_visible(True)
+                ax.spines['right'].set_visible(True)
+                ax.spines['bottom'].set_linewidth(1)
+                ax.spines['left'].set_linewidth(1)
+                ax.spines['top'].set_linewidth(1)
+                ax.spines['right'].set_linewidth(1)
+                ax.tick_params(direction='out', length=5, width=1, labelsize=10)
                 
                 plt.tight_layout()
                 st.pyplot(fig)
@@ -1189,37 +1182,54 @@ elif st.session_state.current_step == 3:
             with tab2:
                 fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6))
                 
-                ax1.plot(st.session_state.deconvolver.x, dy, 'b-', linewidth=1.5)
+                # First derivative
+                ax1.plot(deconv.x, dy, 'b-', linewidth=1.5, label='First derivative')
                 ax1.axhline(y=0, color='r', linestyle='--', alpha=0.5)
-                ax1.set_xlabel(st.session_state.deconvolver.x_label)
+                ax1.set_xlabel(deconv.x_label)
                 ax1.set_ylabel('dy/dx')
                 ax1.set_title('First Derivative')
                 ax1.grid(True, alpha=0.3)
+                ax1.legend()
                 
-                ax2.plot(st.session_state.deconvolver.x, d2y, 'g-', linewidth=1.5)
+                # Second derivative
+                ax2.plot(deconv.x, d2y, 'g-', linewidth=1.5, label='Second derivative')
                 ax2.axhline(y=0, color='r', linestyle='--', alpha=0.5)
-                ax2.set_xlabel(st.session_state.deconvolver.x_label)
+                ax2.set_xlabel(deconv.x_label)
                 ax2.set_ylabel('d²y/dx²')
                 ax2.set_title('Second Derivative')
                 ax2.grid(True, alpha=0.3)
+                ax2.legend()
                 
                 plt.tight_layout()
                 st.pyplot(fig)
                 plt.close()
             
             with tab3:
+                # Create a table with peak information in original units
                 data = []
                 for i, info in enumerate(st.session_state.peak_info):
                     data.append({
                         'Peak': i + 1,
-                        'Center (log)': f"{info['x']:.4f}",
-                        'Center': f"{info['x_linear']:.2e}",
-                        'Amplitude': f"{info['y']:.4f}",
-                        'Sigma': f"{info['sigma_est']:.4f}"
+                        'X Center': f"{info['x_linear']:.4e}",
+                        'Y Amplitude': f"{info['y'] * deconv.y_max:.4e}",
+                        'Estimated Sigma': f"{info['sigma_est']:.4f}",
+                        'dy/dx': f"{info['dy']:.4e}",
+                        'd²y/dx²': f"{info['d2y']:.4e}"
                     })
                 
                 df = pd.DataFrame(data)
                 st.dataframe(df, use_container_width=True)
+                
+                # Show peak detection statistics
+                st.markdown("---")
+                st.subheader("Detection Statistics")
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Total Peaks Found", len(st.session_state.peak_info))
+                with col2:
+                    st.metric("X Range", f"{deconv.x_linear[0]:.2e} - {deconv.x_linear[-1]:.2e}")
+                with col3:
+                    st.metric("Y Range", f"{np.min(deconv.y_original):.2e} - {np.max(deconv.y_original):.2e}")
 
 # ==================== STEP 4: EDITING ====================
 
@@ -1541,6 +1551,7 @@ ID    Center          Amplitude       FWHM        Area           Fraction(%)
                             st.session_state[key] = None
                     st.session_state.current_step = 1
                     st.rerun()
+
 
 
 
