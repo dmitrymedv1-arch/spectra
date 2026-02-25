@@ -17,6 +17,7 @@ import time
 # ==================== STATE MANAGEMENT ====================
 
 @dataclass
+@dataclass
 class AppState:
     """Centralized state management for the application"""
     deconvolver: Optional['GaussianDeconvolver'] = None
@@ -44,7 +45,7 @@ class AppState:
     last_popt: Optional[np.ndarray] = None  # Кэш последних параметров
     pending_split: Optional[Tuple[int, float]] = None  # Ожидающие операции
     pending_remove: Optional[int] = None
-    preview_mode: bool = False  # Режим предпросмотра без подгонки
+    preview_mode: bool = False 
 
 # Initialize session state with dataclass
 if 'app_state' not in st.session_state:
@@ -2382,6 +2383,7 @@ ID    Center          Amplitude       FWHM        Area           Fraction(%)
                 if st.button("🔄 New Analysis", use_container_width=True):
                     st.session_state.app_state = AppState()
                     st.rerun()
+
 
 
 
