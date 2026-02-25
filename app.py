@@ -2158,13 +2158,13 @@ elif st.session_state.app_state.current_step == 5:
         st.markdown("---")
         
         # Create tabs for results
-        tab1, tab2, tab3 = st.tabs(["📊 Graphs", "📋 Table", "📈 Export"])
+        tab1, tab2, tab3, tab4 = st.tabs(["📊 Graphs", "📈 Normalized View", "📋 Table", "📥 Export"])
         
         with tab1:
             col1, col2 = st.columns(2)
             
             with col1:
-                st.subheader("Deconvolution Result")
+                st.subheader("Deconvolution Result (Original Scale)")
                 
                 plotter = SpectrumPlotter()
                 fig, ax = plt.subplots(figsize=(10, 6))
@@ -2173,7 +2173,7 @@ elif st.session_state.app_state.current_step == 5:
                     deconv,
                     show_components=True,
                     show_baseline=True,
-                    title="Deconvolution Result",
+                    title="Deconvolution Result - Original Scale",
                     ax=ax
                 )
                 
@@ -2181,65 +2181,278 @@ elif st.session_state.app_state.current_step == 5:
                 plt.close()
             
             with col2:
-                st.subheader("Area Distribution")
+                st.subheader("Area Distribution Analysis")
                 
-                fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+                # Create a figure with two subplots
+                fig = plt.figure(figsize=(12, 10))
                 
-                # Pie chart
-                peaks = [f'{c["id"]}' for c in deconv.components]
+                # 1. Bar chart of areas (top left)
+                ax1 = plt.subplot(2, 2, 1)
+                peaks = [f'Peak {c["id"]}' for c in deconv.components]
+                areas = [c['area'] for c in deconv.components]
                 fractions = [c['fraction_percent'] for c in deconv.components]
                 colors = plt.cm.Set3(np.linspace(0, 1, len(peaks)))
-                ax1.pie(fractions, labels=peaks, autopct='%1.1f%%',
+                
+                bars1 = ax1.bar(peaks, areas, color=colors, edgecolor='black', alpha=0.7)
+                ax1.set_xlabel('Peak', fontweight='bold')
+                ax1.set_ylabel('Area', fontweight='bold')
+                ax1.set_title('Peak Areas', fontweight='bold')
+                ax1.tick_params(axis='x', rotation=45)
+                ax1.grid(True, alpha=0.3, axis='y')
+                
+                # Add value labels on bars
+                for bar, area in zip(bars1, areas):
+                    height = bar.get_height()
+                    ax1.text(bar.get_x() + bar.get_width()/2., height,
+                            f'{area:.2e}',
+                            ha='center', va='bottom', fontsize=8, rotation=0)
+                
+                # 2. Bar chart of fractions (top right)
+                ax2 = plt.subplot(2, 2, 2)
+                bars2 = ax2.bar(peaks, fractions, color=colors, edgecolor='black', alpha=0.7)
+                ax2.set_xlabel('Peak', fontweight='bold')
+                ax2.set_ylabel('Fraction (%)', fontweight='bold')
+                ax2.set_title('Peak Fractions', fontweight='bold')
+                ax2.tick_params(axis='x', rotation=45)
+                ax2.grid(True, alpha=0.3, axis='y')
+                
+                # Add value labels on bars
+                for bar, frac in zip(bars2, fractions):
+                    height = bar.get_height()
+                    ax2.text(bar.get_x() + bar.get_width()/2., height,
+                            f'{frac:.1f}%',
+                            ha='center', va='bottom', fontsize=8)
+                
+                # 3. Pie chart (bottom left)
+                ax3 = plt.subplot(2, 2, 3)
+                wedges, texts, autotexts = ax3.pie(fractions, labels=peaks, autopct='%1.1f%%',
                        colors=colors, startangle=90,
                        textprops={'fontweight': 'bold'})
-                ax1.set_title('Area Distribution', fontweight='bold')
+                ax3.set_title('Area Distribution - Pie Chart', fontweight='bold')
                 
-                # Bar chart
-                centers = [c['cen_linear'] for c in deconv.components]
-                areas = [c['area'] for c in deconv.components]
+                # 4. Horizontal bar chart (bottom right)
+                ax4 = plt.subplot(2, 2, 4)
+                y_pos = np.arange(len(peaks))
+                bars4 = ax4.barh(y_pos, fractions, color=colors, edgecolor='black', alpha=0.7)
+                ax4.set_yticks(y_pos)
+                ax4.set_yticklabels(peaks)
+                ax4.set_xlabel('Fraction (%)', fontweight='bold')
+                ax4.set_title('Peak Fractions - Horizontal View', fontweight='bold')
+                ax4.grid(True, alpha=0.3, axis='x')
                 
-                if deconv.use_log_x:
-                    ax2.set_xscale('log')
-                
-                bars = ax2.bar(range(len(centers)), areas, 
-                              tick_label=[f'{c:.2e}' for c in centers],
-                              color='steelblue', edgecolor='black', alpha=0.7)
-                ax2.set_xlabel('Peak Center', fontweight='bold')
-                ax2.set_ylabel('Area', fontweight='bold')
-                ax2.set_title('Peak Areas', fontweight='bold')
-                ax2.tick_params(axis='x', rotation=45)
-                
-                # Scientific styling for bar chart
-                ax2.spines['top'].set_visible(True)
-                ax2.spines['right'].set_visible(True)
-                ax2.spines['bottom'].set_linewidth(1)
-                ax2.spines['left'].set_linewidth(1)
-                ax2.spines['top'].set_linewidth(1)
-                ax2.spines['right'].set_linewidth(1)
-                ax2.tick_params(direction='out', length=4, width=1)
-                ax2.grid(True, alpha=0.3, axis='y')
+                # Add value labels
+                for bar, frac in zip(bars4, fractions):
+                    width = bar.get_width()
+                    ax4.text(width + 0.5, bar.get_y() + bar.get_height()/2.,
+                            f'{frac:.1f}%',
+                            ha='left', va='center', fontsize=8)
                 
                 plt.tight_layout()
                 st.pyplot(fig)
                 plt.close()
+            
+            # Summary statistics row
+            st.markdown("---")
+            st.subheader("Summary Statistics")
+            
+            col_sum1, col_sum2, col_sum3, col_sum4 = st.columns(4)
+            
+            with col_sum1:
+                total_area = sum([c['area'] for c in deconv.components])
+                st.metric("Total Area", f"{total_area:.4e}")
+            
+            with col_sum2:
+                n_peaks = len(deconv.components)
+                st.metric("Number of Peaks", f"{n_peaks}")
+            
+            with col_sum3:
+                max_fraction_peak = max(enumerate(deconv.components), key=lambda x: x[1]['fraction'])
+                st.metric("Dominant Peak", f"Peak {max_fraction_peak[1]['id']} ({max_fraction_peak[1]['fraction_percent']:.1f}%)")
+            
+            with col_sum4:
+                avg_area = total_area / n_peaks if n_peaks > 0 else 0
+                st.metric("Average Area", f"{avg_area:.4e}")
         
         with tab2:
-            st.subheader("Results Table")
+            st.subheader("Normalized View (Max Peak Intensity = 1)")
             
-            data = []
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                # Find maximum amplitude for normalization
+                max_amp = max([c['amp'] for c in deconv.components])
+                
+                # Create normalized plot
+                fig_norm, ax_norm = plt.subplots(figsize=(10, 6))
+                
+                # Apply scales
+                if deconv.use_log_x:
+                    ax_norm.set_xscale('log')
+                
+                # Generate dense x for smooth curves
+                if deconv.use_log_x:
+                    x_min = np.maximum(np.min(deconv.x_linear[deconv.x_linear>0]), np.finfo(float).eps)
+                    x_max = np.max(deconv.x_linear)
+                    x_dense = np.logspace(np.log10(x_min), np.log10(x_max), 2000)
+                    x_dense_log = np.log10(x_dense)
+                else:
+                    x_dense = np.linspace(np.min(deconv.x_linear), np.max(deconv.x_linear), 2000)
+                    x_dense_log = x_dense
+                
+                # Plot normalized components
+                colors = plt.cm.Set3(np.linspace(0, 1, len(deconv.components)))
+                for c, color in zip(deconv.components, colors):
+                    y_component_norm = GaussianModel.gaussian(x_dense_log, c['amp_norm'], 
+                                                            c['cen_log'], c['sigma_log']) 
+                    y_component_norm = y_component_norm * deconv.y_max / max_amp
+                    
+                    # Fill under Gaussian
+                    ax_norm.fill_between(x_dense, 0, y_component_norm, 
+                                        color=color, alpha=0.3, linewidth=0)
+                    
+                    # Plot line
+                    ax_norm.plot(x_dense, y_component_norm, '-', color=color, linewidth=2,
+                               label=f'Peak {c["id"]}: {c["fraction_percent"]:.1f}%', zorder=2)
+                
+                # Plot normalized total fit
+                if deconv.baseline_method != 'none' and deconv.baseline_params:
+                    n_peaks = len(deconv.components)
+                    peak_params = []
+                    for c in deconv.components:
+                        peak_params.extend([c['amp_norm'], c['cen_log'], c['sigma_log']])
+                    
+                    y_total_norm = GaussianModel.multi_gaussian_with_baseline(
+                        x_dense_log, n_peaks, peak_params, 
+                        deconv.baseline_params, deconv.baseline_method
+                    ) * deconv.y_max / max_amp
+                else:
+                    y_total_norm = GaussianModel.multi_gaussian(x_dense_log, *deconv.popt) * deconv.y_max / max_amp
+                
+                ax_norm.plot(x_dense, y_total_norm, 'r--', linewidth=2, label='Total Fit', zorder=3)
+                
+                # Plot original data (normalized)
+                y_original_norm = deconv.y_original / max_amp
+                ax_norm.scatter(deconv.x_linear, y_original_norm, 
+                               s=10, alpha=0.5, color='black', label='Data', zorder=1)
+                
+                # Labels and title
+                x_label = 'X' + (' (log scale)' if deconv.use_log_x else '')
+                y_label = 'Normalized Intensity'
+                ax_norm.set_xlabel(x_label, fontsize=12, fontweight='bold')
+                ax_norm.set_ylabel(y_label, fontsize=12, fontweight='bold')
+                ax_norm.set_title('Deconvolution Result - Normalized to Max Peak = 1', fontsize=14, fontweight='bold')
+                
+                # Add quality metrics
+                if deconv.quality_metrics:
+                    metrics_text = f"R² = {deconv.quality_metrics.get('R²', 0):.4f}\n"
+                    metrics_text += f"RMSE = {deconv.quality_metrics.get('RMSE', 0):.2e}"
+                    ax_norm.text(0.02, 0.98, metrics_text, transform=ax_norm.transAxes,
+                                fontsize=10, verticalalignment='top',
+                                bbox=dict(boxstyle="round,pad=0.3", facecolor='white', alpha=0.8))
+                
+                ax_norm.legend(loc='upper right', fontsize=8, frameon=True, edgecolor='black')
+                ax_norm.grid(True, alpha=0.3, linestyle='--')
+                
+                # Scientific styling
+                ax_norm.spines['top'].set_visible(True)
+                ax_norm.spines['right'].set_visible(True)
+                ax_norm.spines['bottom'].set_linewidth(1)
+                ax_norm.spines['left'].set_linewidth(1)
+                ax_norm.spines['top'].set_linewidth(1)
+                ax_norm.spines['right'].set_linewidth(1)
+                ax_norm.tick_params(direction='out', length=4, width=1)
+                
+                st.pyplot(fig_norm)
+                plt.close()
+            
+            with col2:
+                st.subheader("Normalized Components Comparison")
+                
+                fig_comp_norm, ax_comp_norm = plt.subplots(figsize=(10, 6))
+                
+                # Plot all normalized components on the same axes without fill
+                colors = plt.cm.Set3(np.linspace(0, 1, len(deconv.components)))
+                for c, color in zip(deconv.components, colors):
+                    y_component_norm = GaussianModel.gaussian(x_dense_log, c['amp_norm'], 
+                                                            c['cen_log'], c['sigma_log']) 
+                    y_component_norm = y_component_norm * deconv.y_max / max_amp
+                    
+                    ax_comp_norm.plot(x_dense, y_component_norm, '-', color=color, linewidth=2,
+                                    label=f'Peak {c["id"]} (center: {c["cen_linear"]:.2e})')
+                
+                # Add vertical lines at peak centers
+                for c in deconv.components:
+                    ax_comp_norm.axvline(x=c['cen_linear'], color='gray', linestyle=':', alpha=0.5)
+                
+                ax_comp_norm.set_xlabel(x_label, fontsize=12, fontweight='bold')
+                ax_comp_norm.set_ylabel('Normalized Intensity', fontsize=12, fontweight='bold')
+                ax_comp_norm.set_title('Normalized Components Overlay', fontsize=14, fontweight='bold')
+                ax_comp_norm.legend(loc='upper right', fontsize=8, frameon=True, edgecolor='black')
+                ax_comp_norm.grid(True, alpha=0.3, linestyle='--')
+                
+                if deconv.use_log_x:
+                    ax_comp_norm.set_xscale('log')
+                
+                st.pyplot(fig_comp_norm)
+                plt.close()
+            
+            # Table of normalized values
+            st.subheader("Normalized Parameters")
+            norm_data = []
             for c in deconv.components:
-                data.append({
+                norm_data.append({
                     'Peak': c['id'],
                     'Center': f"{c['cen_linear']:.4e}",
-                    'Amplitude': f"{c['amp']:.4e}",
-                    'Sigma': f"{c['sigma_log']:.4f}",
-                    'FWHM': f"{c['fwhm']:.4f}",
-                    'Area': f"{c['area']:.4e}",
+                    'Normalized Amplitude': f"{c['amp'] / max_amp:.4f}",
+                    'Original Amplitude': f"{c['amp']:.4e}",
                     'Fraction (%)': f"{c['fraction_percent']:.2f}"
                 })
             
+            df_norm = pd.DataFrame(norm_data)
+            st.dataframe(df_norm, use_container_width=True)
+        
+        with tab3:
+            st.subheader("Results Table - Complete Dataset")
+            
+            # Main results table
+            data = []
+            for c in deconv.components:
+                data.append({
+                    'Peak ID': c['id'],
+                    'Center': c['cen_linear'],
+                    'Center (log)': c['cen_log'],
+                    'Amplitude': c['amp'],
+                    'Amplitude (norm)': c['amp_norm'],
+                    'Sigma (log)': c['sigma_log'],
+                    'FWHM': c['fwhm'],
+                    'Area': c['area'],
+                    'Fraction': c['fraction'],
+                    'Fraction (%)': c['fraction_percent']
+                })
+            
             df = pd.DataFrame(data)
-            st.dataframe(df, use_container_width=True)
+            
+            # Format for display
+            display_df = df.copy()
+            for col in ['Center', 'Amplitude', 'Area']:
+                display_df[col] = display_df[col].apply(lambda x: f"{x:.4e}")
+            display_df['Center (log)'] = display_df['Center (log)'].apply(lambda x: f"{x:.4f}")
+            display_df['Amplitude (norm)'] = display_df['Amplitude (norm)'].apply(lambda x: f"{x:.4f}")
+            display_df['Sigma (log)'] = display_df['Sigma (log)'].apply(lambda x: f"{x:.4f}")
+            display_df['FWHM'] = display_df['FWHM'].apply(lambda x: f"{x:.4f}")
+            display_df['Fraction (%)'] = display_df['Fraction (%)'].apply(lambda x: f"{x:.2f}")
+            
+            st.dataframe(display_df, use_container_width=True)
+            
+            # Download button for raw data
+            csv = df.to_csv(index=False)
+            st.download_button(
+                label="📥 Download Raw Data (CSV)",
+                data=csv,
+                file_name=f"deconvolution_peaks_raw_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
             
             st.markdown("---")
             
@@ -2254,38 +2467,51 @@ elif st.session_state.app_state.current_step == 5:
             
             st.markdown("---")
             
+            # Quality metrics in columns
+            st.subheader("Quality Metrics")
             metrics = deconv.quality_metrics
-            col1, col2, col3, col4 = st.columns(4)
             
-            with col1:
+            col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+            with col_m1:
                 st.metric("R²", f"{metrics.get('R²', 0):.6f}")
-            with col2:
+            with col_m2:
                 st.metric("AIC", f"{metrics.get('AIC', 0):.2f}")
-            with col3:
+            with col_m3:
                 st.metric("BIC", f"{metrics.get('BIC', 0):.2f}")
-            with col4:
+            with col_m4:
                 st.metric("RMSE", f"{metrics.get('RMSE', 0):.2e}")
+            
+            col_m5, col_m6, col_m7, col_m8 = st.columns(4)
+            with col_m5:
+                st.metric("χ²", f"{metrics.get('χ²', 0):.2e}")
+            with col_m6:
+                st.metric("Max Error", f"{metrics.get('Max Error', 0):.2e}")
+            with col_m7:
+                st.metric("N Parameters", len(deconv.popt) if deconv.popt is not None else 0)
+            with col_m8:
+                st.metric("N Points", len(deconv.x_linear))
         
-        with tab3:
+        with tab4:
             st.subheader("Export Results")
             
             col1, col2 = st.columns(2)
             
             with col1:
-                # Export to CSV
-                if st.button("📥 Export to CSV", use_container_width=True):
-                    # Peak data
+                # Export peaks to CSV
+                if st.button("📥 Export Peaks to CSV", use_container_width=True):
                     df_peaks = pd.DataFrame([{
                         'Peak_ID': c['id'],
                         'Center': c['cen_linear'],
+                        'Center_log': c['cen_log'],
                         'Amplitude': c['amp'],
-                        'Sigma': c['sigma_log'],
+                        'Amplitude_norm': c['amp_norm'],
+                        'Sigma_log': c['sigma_log'],
                         'FWHM': c['fwhm'],
                         'Area': c['area'],
+                        'Fraction': c['fraction'],
                         'Fraction_Percent': c['fraction_percent']
                     } for c in deconv.components])
                     
-                    # Convert to CSV
                     csv_peaks = df_peaks.to_csv(index=False)
                     
                     st.download_button(
@@ -2295,43 +2521,50 @@ elif st.session_state.app_state.current_step == 5:
                         mime="text/csv",
                         use_container_width=True
                     )
-                    
-                    # Fitting data
-                    if 'Residuals' in deconv.quality_metrics:
-                        # Reconstruct fit with baseline if needed
-                        if deconv.baseline_method != 'none' and deconv.baseline_params:
-                            n_peaks = len(deconv.components)
-                            peak_params = []
-                            for c in deconv.components:
-                                peak_params.extend([c['amp_norm'], c['cen_log'], c['sigma_log']])
-                            
-                            fit_y_norm = GaussianModel.multi_gaussian_with_baseline(
-                                deconv.x, n_peaks, peak_params, 
-                                deconv.baseline_params, deconv.baseline_method
-                            )
-                        else:
-                            fit_y_norm = deconv.fit_y_norm
+                
+                # Export fitting data
+                if 'Residuals' in deconv.quality_metrics:
+                    # Reconstruct fit with baseline if needed
+                    if deconv.baseline_method != 'none' and deconv.baseline_params:
+                        n_peaks = len(deconv.components)
+                        peak_params = []
+                        for c in deconv.components:
+                            peak_params.extend([c['amp_norm'], c['cen_log'], c['sigma_log']])
                         
-                        df_fit = pd.DataFrame({
-                            'X_original': deconv.x_linear,
-                            'Y_original': deconv.y_original,
-                            'Y_fit': fit_y_norm * deconv.y_max,
-                            'Residuals': deconv.quality_metrics['Residuals'] * deconv.y_max
-                        })
-                        
-                        csv_fit = df_fit.to_csv(index=False)
-                        
-                        st.download_button(
-                            label="Download Fitting CSV",
-                            data=csv_fit,
-                            file_name=f"deconvolution_fit_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                            mime="text/csv",
-                            use_container_width=True
+                        fit_y_norm = GaussianModel.multi_gaussian_with_baseline(
+                            deconv.x, n_peaks, peak_params, 
+                            deconv.baseline_params, deconv.baseline_method
                         )
+                    else:
+                        fit_y_norm = deconv.fit_y_norm
+                    
+                    # Generate normalized fit data
+                    max_amp = max([c['amp'] for c in deconv.components])
+                    
+                    df_fit = pd.DataFrame({
+                        'X_original': deconv.x_linear,
+                        'Y_original': deconv.y_original,
+                        'Y_fit': fit_y_norm * deconv.y_max,
+                        'Y_fit_normalized': fit_y_norm * deconv.y_max / max_amp,
+                        'Residuals': deconv.quality_metrics['Residuals'] * deconv.y_max,
+                        'Residuals_normalized': deconv.quality_metrics['Residuals'] * deconv.y_max / max_amp
+                    })
+                    
+                    csv_fit = df_fit.to_csv(index=False)
+                    
+                    st.download_button(
+                        label="Download Fitting CSV",
+                        data=csv_fit,
+                        file_name=f"deconvolution_fit_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                        mime="text/csv",
+                        use_container_width=True
+                    )
             
             with col2:
                 # Export report
-                if st.button("📄 Export Report", use_container_width=True):
+                if st.button("📄 Export Detailed Report", use_container_width=True):
+                    max_amp = max([c['amp'] for c in deconv.components])
+                    
                     report = f"""GAUSSIAN DECONVOLUTION REPORT
 {"="*80}
 
@@ -2358,7 +2591,7 @@ Parameters: {', '.join([f'{p:.4e}' for p in deconv.baseline_params])}
 
 """
                     
-                    report += f"""COMPONENTS:
+                    report += f"""COMPONENTS (ORIGINAL SCALE):
 {"-"*80}
 ID    Center          Amplitude       FWHM        Area           Fraction(%)
 {"-"*80}"""
@@ -2366,7 +2599,22 @@ ID    Center          Amplitude       FWHM        Area           Fraction(%)
                     for c in deconv.components:
                         report += f"\n{c['id']:<4} {c['cen_linear']:<15.4e} {c['amp']:<15.4e} {c['fwhm']:<12.4f} {c['area']:<15.4e} {c['fraction_percent']:<10.2f}"
                     
-                    report += f"\n{'='*80}\nTotal area: {deconv.total_area:.6e}\n{'='*80}"
+                    report += f"""
+
+COMPONENTS (NORMALIZED TO MAX PEAK = 1):
+{"-"*80}
+ID    Center          Norm. Amplitude    Original Amplitude    Fraction(%)
+{"-"*80}"""
+                    
+                    for c in deconv.components:
+                        norm_amp = c['amp'] / max_amp
+                        report += f"\n{c['id']:<4} {c['cen_linear']:<15.4e} {norm_amp:<18.4f} {c['amp']:<20.4e} {c['fraction_percent']:<10.2f}"
+                    
+                    report += f"""
+{"="*80}
+Total area: {deconv.total_area:.6e}
+Maximum amplitude (for normalization): {max_amp:.6e}
+{"="*80}"""
                     
                     st.download_button(
                         label="Download Report",
@@ -2378,13 +2626,86 @@ ID    Center          Amplitude       FWHM        Area           Fraction(%)
             
             st.markdown("---")
             
+            # Export figures
+            st.subheader("Export Figures")
+            
+            col_fig1, col_fig2 = st.columns(2)
+            
+            with col_fig1:
+                if st.button("📊 Save Original Scale Figure", use_container_width=True):
+                    fig, ax = plt.subplots(figsize=(12, 8))
+                    plotter.plot_deconvolution_result(
+                        deconv,
+                        show_components=True,
+                        show_baseline=True,
+                        title="Deconvolution Result - Original Scale",
+                        ax=ax
+                    )
+                    
+                    # Save to buffer
+                    buf = io.BytesIO()
+                    fig.savefig(buf, format='png', dpi=300, bbox_inches='tight')
+                    buf.seek(0)
+                    plt.close(fig)
+                    
+                    st.download_button(
+                        label="Download PNG",
+                        data=buf,
+                        file_name=f"deconvolution_original_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png",
+                        mime="image/png",
+                        use_container_width=True
+                    )
+            
+            with col_fig2:
+                if st.button("📈 Save Normalized Scale Figure", use_container_width=True):
+                    fig_norm, ax_norm = plt.subplots(figsize=(12, 8))
+                    
+                    max_amp = max([c['amp'] for c in deconv.components])
+                    
+                    if deconv.use_log_x:
+                        ax_norm.set_xscale('log')
+                    
+                    x_dense = np.linspace(np.min(deconv.x_linear), np.max(deconv.x_linear), 2000)
+                    x_dense_log = x_dense if not deconv.use_log_x else np.log10(x_dense)
+                    
+                    colors = plt.cm.Set3(np.linspace(0, 1, len(deconv.components)))
+                    for c, color in zip(deconv.components, colors):
+                        y_component_norm = GaussianModel.gaussian(x_dense_log, c['amp_norm'], 
+                                                                c['cen_log'], c['sigma_log']) 
+                        y_component_norm = y_component_norm * deconv.y_max / max_amp
+                        
+                        ax_norm.fill_between(x_dense, 0, y_component_norm, 
+                                            color=color, alpha=0.3, linewidth=0)
+                        ax_norm.plot(x_dense, y_component_norm, '-', color=color, linewidth=2,
+                                   label=f'Peak {c["id"]}: {c["fraction_percent"]:.1f}%')
+                    
+                    y_original_norm = deconv.y_original / max_amp
+                    ax_norm.scatter(deconv.x_linear, y_original_norm, 
+                                   s=10, alpha=0.5, color='black', label='Data')
+                    
+                    ax_norm.set_xlabel('X' + (' (log scale)' if deconv.use_log_x else ''))
+                    ax_norm.set_ylabel('Normalized Intensity')
+                    ax_norm.set_title('Deconvolution Result - Normalized')
+                    ax_norm.legend()
+                    ax_norm.grid(True, alpha=0.3)
+                    
+                    buf = io.BytesIO()
+                    fig_norm.savefig(buf, format='png', dpi=300, bbox_inches='tight')
+                    buf.seek(0)
+                    plt.close(fig_norm)
+                    
+                    st.download_button(
+                        label="Download PNG",
+                        data=buf,
+                        file_name=f"deconvolution_normalized_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png",
+                        mime="image/png",
+                        use_container_width=True
+                    )
+            
+            st.markdown("---")
+            
             col_a, col_b = st.columns(2)
             with col_a:
                 if st.button("🔄 New Analysis", use_container_width=True):
                     st.session_state.app_state = AppState()
                     st.rerun()
-
-
-
-
-
