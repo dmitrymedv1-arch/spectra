@@ -1689,7 +1689,7 @@ elif st.session_state.app_state.current_step == 4:
             st.markdown("---")
             
             # Peak selection
-            peak_options = {f"Peak {c['id']}: center = {c['cen_linear']:.2e}, fraction = {c['fraction_percent']:.1f}%": c['id'] 
+            peak_options = {f"Peak {c['id']}: center = {c.get('cen_linear', c.get('cen_log', 0)):.2e}, fraction = {c['fraction_percent']:.1f}%": c['id'] 
                            for c in st.session_state.app_state.deconvolver.components}
             
             selected_peak = st.selectbox(
@@ -1963,3 +1963,4 @@ ID    Center          Amplitude       FWHM        Area           Fraction(%)
                 if st.button("🔄 New Analysis", use_container_width=True):
                     st.session_state.app_state = AppState()
                     st.rerun()
+
