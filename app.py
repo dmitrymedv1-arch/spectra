@@ -1254,6 +1254,13 @@ elif st.session_state.current_step == 5:
                 for c, color in zip(st.session_state.deconvolver.components, colors):
                     y_component = GaussianModel.gaussian(x_dense_log, c['amp_norm'], 
                                                         c['cen_log'], c['sigma_log']) * st.session_state.deconvolver.y_max
+                    
+                    # Добавляем заливку под гауссианом
+                    ax.fill_between(x_dense, 0, y_component, 
+                                    color=color, alpha=0.3,  # alpha для прозрачности
+                                    linewidth=0)  # убираем контур у заливки
+                    
+                    # Добавляем линию поверх заливки
                     ax.plot(x_dense, y_component, '-', color=color, linewidth=2,
                            label=f'Peak {c["id"]}: {c["fraction_percent"]:.1f}%')
                 
@@ -1449,3 +1456,4 @@ ID    Center          Amplitude       FWHM        Area           Fraction(%)
                             st.session_state[key] = None
                     st.session_state.current_step = 1
                     st.rerun()
+
