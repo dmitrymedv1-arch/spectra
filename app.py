@@ -291,8 +291,8 @@ class GaussianDeconvolver:
         self.y_original = self.y_original[sort_idx]
         
         # Store sorted original data for display
-        self.x_original_sorted = self.x_linear.copy()
-        self.y_original_sorted = self.y_original.copy()
+        self.x_sorted = self.x_linear.copy()  # Исправлено: x_sorted вместо x_original_sorted
+        self.y_sorted = self.y_original.copy()  # Исправлено: y_sorted вместо y_original_sorted
         
         # For fitting - create working copies with minimal necessary modifications
         # Replace negative Y with 0 only for fitting (spectral data cannot be negative)
@@ -391,8 +391,8 @@ class GaussianDeconvolver:
                 x_linear = self.x[peak_idx]
             
             # Find closest index in original data
-            idx = np.argmin(np.abs(self.x_original_sorted - x_linear))
-            y_original_value = self.y_original_sorted[idx]
+            idx = np.argmin(np.abs(self.x_sorted - x_linear))
+            y_original_value = self.y_sorted[idx]
             
             peak_info.append({
                 'index': peak_idx,
@@ -1623,6 +1623,7 @@ ID    Center          Amplitude       FWHM        Area           Fraction(%)
                             st.session_state[key] = None
                     st.session_state.current_step = 1
                     st.rerun()
+
 
 
 
