@@ -1188,7 +1188,7 @@ elif st.session_state.current_step == 3:
                     ax.set_yscale('log')
                 
                 # Plot original data directly - NO MODIFICATIONS
-                ax.plot(deconv.x_original_sorted, deconv.y_original_sorted, 
+                ax.plot(deconv.x_sorted, deconv.y_sorted, 
                        'o-', markersize=3, linewidth=1, alpha=0.7, 
                        label='Original Data', color='black', zorder=1)
                 
@@ -1203,7 +1203,7 @@ elif st.session_state.current_step == 3:
                     y_smooth_original = y_smooth * deconv.y_max
                 
                 # Plot smoothed data
-                ax.plot(deconv.x_original_sorted, y_smooth_original, 
+                ax.plot(deconv.x_sorted, y_smooth_original, 
                        'r-', linewidth=2, label='Smoothed', color='red', zorder=2)
                 
                 # Mark detected peaks
@@ -1236,8 +1236,8 @@ elif st.session_state.current_step == 3:
                 
                 # Set y-axis limits to match original data if needed
                 if not deconv.use_log_y:
-                    y_min = max(0, np.min(deconv.y_original_sorted) * 0.9)
-                    y_max = np.max(deconv.y_original_sorted) * 1.1
+                    y_min = max(0, np.min(deconv.y_sorted) * 0.9)
+                    y_max = np.max(deconv.y_sorted) * 1.1
                     ax.set_ylim(y_min, y_max)
                 
                 # Scientific styling
@@ -1299,9 +1299,9 @@ elif st.session_state.current_step == 3:
                 with col1:
                     st.metric("Total Peaks Found", len(st.session_state.peak_info))
                 with col2:
-                    st.metric("X Range", f"{np.min(deconv.x_original_sorted):.2e} - {np.max(deconv.x_original_sorted):.2e}")
+                    st.metric("X Range", f"{np.min(deconv.x_sorted):.2e} - {np.max(deconv.x_sorted):.2e}")
                 with col3:
-                    st.metric("Y Range", f"{np.min(deconv.y_original_sorted):.2e} - {np.max(deconv.y_original_sorted):.2e}")
+                    st.metric("Y Range", f"{np.min(deconv.y_sorted):.2e} - {np.max(deconv.y_sorted):.2e}")
 
 # ==================== STEP 4: EDITING ====================
 
@@ -1623,6 +1623,7 @@ ID    Center          Amplitude       FWHM        Area           Fraction(%)
                             st.session_state[key] = None
                     st.session_state.current_step = 1
                     st.rerun()
+
 
 
 
