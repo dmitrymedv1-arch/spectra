@@ -1083,20 +1083,32 @@ elif st.session_state.current_step == 3:
             with tab1:
                 fig, ax = plt.subplots(figsize=(10, 5))
                 
-                ax.plot(st.session_state.deconvolver.x, st.session_state.deconvolver.y_norm, 
+                # Always use original Y scale
+                ax.plot(st.session_state.deconvolver.x, st.session_state.deconvolver.y, 
                        'o-', markersize=3, alpha=0.5, label='Data', color='black')
-                ax.plot(st.session_state.deconvolver.x, y_smooth, 
+                ax.plot(st.session_state.deconvolver.x, y_smooth * st.session_state.deconvolver.y_max, 
                        'r-', linewidth=2, label='Smoothed')
                 
                 for i, info in enumerate(st.session_state.peak_info):
-                    ax.plot(info['x'], info['y'], 'ro', markersize=8, markeredgecolor='darkred')
-                    ax.text(info['x'], info['y']*1.05, f'{i+1}', ha='center', fontweight='bold')
+                    ax.plot(info['x'], info['y'] * st.session_state.deconvolver.y_max, 
+                           'ro', markersize=8, markeredgecolor='darkred')
+                    ax.text(info['x'], info['y'] * st.session_state.deconvolver.y_max * 1.05, 
+                           f'{i+1}', ha='center', fontweight='bold')
                 
                 ax.set_xlabel(st.session_state.deconvolver.x_label)
-                ax.set_ylabel('Normalized Y')
-                ax.set_title('Detected Peaks')
+                ax.set_ylabel(st.session_state.deconvolver.y_label)
+                ax.set_title('Detected Peaks (Original Scale)')
                 ax.legend()
                 ax.grid(True, alpha=0.3)
+                
+                # Scientific styling
+                ax.spines['top'].set_visible(True)
+                ax.spines['right'].set_visible(True)
+                ax.spines['bottom'].set_linewidth(1)
+                ax.spines['left'].set_linewidth(1)
+                ax.spines['top'].set_linewidth(1)
+                ax.spines['right'].set_linewidth(1)
+                ax.tick_params(direction='out', length=4, width=1)
                 
                 st.pyplot(fig)
                 plt.close()
@@ -1456,4 +1468,5 @@ ID    Center          Amplitude       FWHM        Area           Fraction(%)
                             st.session_state[key] = None
                     st.session_state.current_step = 1
                     st.rerun()
+
 
