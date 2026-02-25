@@ -1810,7 +1810,7 @@ elif st.session_state.app_state.current_step == 5:
                 ax1.set_title('Area Distribution', fontweight='bold')
                 
                 # Bar chart
-                centers = [c['cen_linear'] for c in st.session_state.app_state.deconvolver.components]
+                centers = [c.get('cen_linear', 0) for c in st.session_state.app_state.deconvolver.components]
                 areas = [c['area'] for c in st.session_state.app_state.deconvolver.components]
                 
                 if st.session_state.app_state.deconvolver.use_log_x:
@@ -1963,4 +1963,5 @@ ID    Center          Amplitude       FWHM        Area           Fraction(%)
                 if st.button("🔄 New Analysis", use_container_width=True):
                     st.session_state.app_state = AppState()
                     st.rerun()
+
 
