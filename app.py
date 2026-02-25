@@ -1119,55 +1119,68 @@ elif st.session_state.current_step == 3:
             tab1, tab2, tab3 = st.tabs(["📊 Peaks", "📈 Derivatives", "📋 Information"])
 
             with tab1:
-                # Убираем чекбокс и всегда показываем данные в原始ном масштабе
                 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
                 
-                # График 1: Линейный масштаб (как на шаге 2)
-                ax1.plot(st.session_state.deconvolver.x_linear, 
-                         st.session_state.deconvolver.y_original, 
+                # Получаем данные из deconvolver
+                deconv = st.session_state.deconvolver
+                
+                # График 1: В том же масштабе, что был выбран на шаге 2
+                if deconv.use_log_x:
+                    ax1.set_xscale('log')
+                if deconv.use_log_y:
+                    ax1.set_yscale('log')
+                
+                # Данные для первого графика - используем оригинальные значения, 
+                # но с правильным масштабом осей
+                ax1.plot(deconv.x_linear, deconv.y_original, 
                          'o-', markersize=3, alpha=0.5, label='Data', color='black')
-                ax1.plot(st.session_state.deconvolver.x_linear, 
-                         st.session_state.derivatives[2] * st.session_state.deconvolver.y_max, 
+                
+                # Сглаженные данные - преобразуем обратно в оригинальный масштаб
+                y_smooth_original = st.session_state.derivatives[2] * deconv.y_max
+                ax1.plot(deconv.x_linear, y_smooth_original, 
                          'r-', linewidth=2, label='Smoothed')
                 
                 # Отмечаем найденные пики
                 for i, info in enumerate(st.session_state.peak_info):
+                    # Для пиков используем оригинальные координаты
                     ax1.plot(info['x_linear'], 
-                             info['y'] * st.session_state.deconvolver.y_max, 
+                             info['y'] * deconv.y_max, 
                              'ro', markersize=8, markeredgecolor='darkred')
                     ax1.text(info['x_linear'], 
-                            info['y'] * st.session_state.deconvolver.y_max * 1.05, 
+                            info['y'] * deconv.y_max * 1.05, 
                             f'{i+1}', ha='center', fontweight='bold')
                 
-                ax1.set_xlabel('X (linear)')
-                ax1.set_ylabel('Y (original)')
-                ax1.set_title('Linear Scale (as in Step 2)')
+                # Подписи осей с учетом выбранного масштаба
+                x_label = 'X'
+                if deconv.use_log_x:
+                    x_label += ' (log scale)'
+                y_label = 'Y'
+                if deconv.use_log_y:
+                    y_label += ' (log scale)'
+                
+                ax1.set_xlabel(x_label)
+                ax1.set_ylabel(y_label)
+                ax1.set_title(f'Same scale as Step 2: {x_label}, {y_label}')
                 ax1.legend()
                 ax1.grid(True, alpha=0.3)
                 
-                # График 2: Логарифмический масштаб (если применимо)
-                if st.session_state.use_log_x or st.session_state.use_log_y:
-                    x_plot = st.session_state.deconvolver.x
-                    y_plot = st.session_state.deconvolver.y
-                    
-                    ax2.plot(x_plot, y_plot, 
-                            'o-', markersize=3, alpha=0.5, label='Data', color='black')
-                    ax2.plot(x_plot, st.session_state.derivatives[2], 
-                            'r-', linewidth=2, label='Smoothed')
-                    
-                    for i, info in enumerate(st.session_state.peak_info):
-                        ax2.plot(info['x'], info['y'], 
-                                'ro', markersize=8, markeredgecolor='darkred')
-                        ax2.text(info['x'], info['y'] * 1.05, 
-                                f'{i+1}', ha='center', fontweight='bold')
-                    
-                    ax2.set_xlabel(st.session_state.deconvolver.x_label)
-                    ax2.set_ylabel(st.session_state.deconvolver.y_label)
-                    ax2.set_title('Log Scale (as in Step 2)')
-                    ax2.legend()
-                    ax2.grid(True, alpha=0.3)
-                else:
-                    ax2.set_visible(False)
+                # График 2: Преобразованные данные (логарифмические координаты, если применимо)
+                ax2.plot(deconv.x, deconv.y_norm * deconv.y_max, 
+                         'o-', markersize=3, alpha=0.5, label='Data', color='black')
+                ax2.plot(deconv.x, st.session_state.derivatives[2] * deconv.y_max, 
+                         'r-', linewidth=2, label='Smoothed')
+                
+                for i, info in enumerate(st.session_state.peak_info):
+                    ax2.plot(info['x'], info['y'] * deconv.y_max, 
+                            'ro', markersize=8, markeredgecolor='darkred')
+                    ax2.text(info['x'], info['y'] * deconv.y_max * 1.05, 
+                            f'{i+1}', ha='center', fontweight='bold')
+                
+                ax2.set_xlabel(deconv.x_label)  # Это будет 'log₁₀(X)' если use_log_x=True
+                ax2.set_ylabel(deconv.y_label)  # Это будет 'log₁₀(Y)' если use_log_y=True
+                ax2.set_title('Transformed coordinates (for fitting)')
+                ax2.grid(True, alpha=0.3)
+                ax2.legend()
                 
                 plt.tight_layout()
                 st.pyplot(fig)
@@ -1528,6 +1541,7 @@ ID    Center          Amplitude       FWHM        Area           Fraction(%)
                             st.session_state[key] = None
                     st.session_state.current_step = 1
                     st.rerun()
+
 
 
 
