@@ -1600,7 +1600,7 @@ with st.sidebar:
         
         st.session_state.app_state.preview_mode = st.checkbox(
             "Preview mode (no fitting)",
-            alue=st.session_state.app_state.preview_mode,
+            value=st.session_state.app_state.preview_mode,
             help="Show estimated peaks without performing optimization"
         )
     
@@ -2382,5 +2382,6 @@ ID    Center          Amplitude       FWHM        Area           Fraction(%)
                 if st.button("🔄 New Analysis", use_container_width=True):
                     st.session_state.app_state = AppState()
                     st.rerun()
+
 
 
