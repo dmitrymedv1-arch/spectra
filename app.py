@@ -246,22 +246,34 @@ class GaussianDeconvolver:
     """Class for spectral deconvolution"""
     
     def __init__(self, x_linear, y_original, use_log_x=True, use_log_y=False):
+        # Store original data WITHOUT ANY MODIFICATIONS for display purposes
+        self.x_original = np.array(x_linear).copy()
+        self.y_original_raw = np.array(y_original).copy()
+        
+        # Working arrays that may be modified
         self.x_linear = np.array(x_linear)
         self.y_original = np.array(y_original)
         self.use_log_x = use_log_x
         self.use_log_y = use_log_y
         
-        # Sort by X
+        # Sort by X to ensure monotonic increasing X
         sort_idx = np.argsort(self.x_linear)
         self.x_linear = self.x_linear[sort_idx]
         self.y_original = self.y_original[sort_idx]
         
-        # Replace negative Y with 0
-        self.y_original = np.maximum(self.y_original, 0)
+        # Store sorted original data for display
+        self.x_original_sorted = self.x_linear.copy()
+        self.y_original_sorted = self.y_original.copy()
         
-        # Apply logarithmic transformations
-        eps = 1e-12
+        # For fitting - create working copies with minimal necessary modifications
+        # Replace negative Y with 0 only for fitting (spectral data cannot be negative)
+        self.y_for_fitting = np.maximum(self.y_original, 0)
+        
+        # Apply logarithmic transformations for fitting if requested
+        eps = 1e-12  # Small epsilon to avoid log(0)
+        
         if use_log_x:
+            # For log X, ensure positive values
             self.x = np.log10(np.maximum(self.x_linear, eps))
             self.x_label = 'log₁₀(X)'
         else:
@@ -269,20 +281,22 @@ class GaussianDeconvolver:
             self.x_label = 'X'
         
         if use_log_y:
-            self.y = np.log10(np.maximum(self.y_original, eps))
+            # For log Y, ensure positive values
+            self.y = np.log10(np.maximum(self.y_for_fitting, eps))
             self.y_label = 'log₁₀(Y)'
         else:
-            self.y = self.y_original
+            self.y = self.y_for_fitting
             self.y_label = 'Y'
         
-        # Normalization for stability
-        self.y_max = np.max(np.abs(self.y))
+        # Normalization for fitting stability
+        # This is ONLY for fitting - display should use original values
+        self.y_max = np.max(self.y) if np.max(self.y) > 0 else 1.0
         if self.y_max > 0:
             self.y_norm = self.y / self.y_max
         else:
             self.y_norm = self.y
         
-        # Results
+        # Results containers
         self.components = []
         self.fit_y_norm = None
         self.popt = None
@@ -290,7 +304,7 @@ class GaussianDeconvolver:
         self.convergence_history = []
         self.total_area = 0
         
-        # For compatibility
+        # For compatibility with existing code
         self.multi_gaussian = GaussianModel.multi_gaussian
         self.gaussian = GaussianModel.gaussian
     
@@ -1054,8 +1068,12 @@ elif st.session_state.current_step == 2:
 elif st.session_state.current_step == 3:
     st.header("Step 3: Peak Detection")
     
-    # Create deconvolver if not yet created
+    # Create deconvolver if not yet created - but ensure it preserves original data
     if st.session_state.deconvolver is None:
+        # Store original data separately to avoid any modifications
+        st.session_state.original_x = st.session_state.raw_x.copy()
+        st.session_state.original_y = st.session_state.raw_y.copy()
+        
         st.session_state.deconvolver = GaussianDeconvolver(
             st.session_state.raw_x,
             st.session_state.raw_y,
@@ -1119,6 +1137,11 @@ elif st.session_state.current_step == 3:
             tab1, tab2, tab3 = st.tabs(["📊 Peaks", "📈 Derivatives", "📋 Information"])
 
             with tab1:
+                # DEBUG INFO - show actual data ranges
+                st.caption(f"Debug: Original Y range: [{np.min(st.session_state.original_y):.2f}, {np.max(st.session_state.original_y):.2f}]")
+                st.caption(f"Debug: y_max from deconvolver: {deconv.y_max:.2f}")
+                st.caption(f"Debug: y_smooth range: [{np.min(y_smooth):.4f}, {np.max(y_smooth):.4f}]")
+                
                 # Create a figure with the EXACT same appearance as in Step 2
                 fig, ax = plt.subplots(figsize=(10, 6))
                 
@@ -1128,29 +1151,51 @@ elif st.session_state.current_step == 3:
                 if deconv.use_log_y:
                     ax.set_yscale('log')
                 
-                # Plot original data exactly as in Step 2 - NO NORMALIZATION
-                ax.plot(deconv.x_linear, deconv.y_original, 
+                # Plot original data directly from stored original values - NO MODIFICATIONS
+                ax.plot(st.session_state.original_x, st.session_state.original_y, 
                        'o-', markersize=3, linewidth=1, alpha=0.7, 
-                       label='Original Data', color='black')
+                       label='Original Data', color='black', zorder=1)
                 
-                # Plot smoothed data in the same scale
-                # IMPORTANT: y_smooth is normalized, so we need to denormalize it
-                # to match the original Y scale
-                y_smooth_original = y_smooth * deconv.y_max
-                ax.plot(deconv.x_linear, y_smooth_original, 
-                       'r-', linewidth=2, label='Smoothed', color='red')
+                # Check if y_smooth needs denormalization
+                # If y_smooth is in normalized form (0-1 range), denormalize it
+                if np.max(y_smooth) <= 1.0 and np.max(st.session_state.original_y) > 10:
+                    # y_smooth is normalized - denormalize using original data max
+                    y_smooth_original = y_smooth * np.max(st.session_state.original_y)
+                    st.caption(f"Debug: Denormalized y_smooth range: [{np.min(y_smooth_original):.2f}, {np.max(y_smooth_original):.2f}]")
+                else:
+                    # y_smooth might already be in original scale
+                    y_smooth_original = y_smooth
+                    st.caption(f"Debug: Using y_smooth as is")
+                
+                # Plot smoothed data
+                ax.plot(st.session_state.original_x, y_smooth_original, 
+                       'r-', linewidth=2, label='Smoothed', color='red', zorder=2)
                 
                 # Mark detected peaks
                 for i, info in enumerate(st.session_state.peak_info):
-                    # Denormalize the Y value to match original scale
-                    peak_y_original = info['y'] * deconv.y_max
-                    ax.plot(info['x_linear'], peak_y_original, 
+                    # Get peak Y value - need to ensure it's in original scale
+                    if 'y_original' in info:
+                        peak_y = info['y_original']
+                    else:
+                        # Try to reconstruct original Y value
+                        # Find closest x point in original data
+                        idx = np.argmin(np.abs(st.session_state.original_x - info['x_linear']))
+                        peak_y = st.session_state.original_y[idx]
+                        
+                        # If that fails, use denormalized value
+                        if peak_y == 0 and info['y'] > 0:
+                            peak_y = info['y'] * np.max(st.session_state.original_y)
+                    
+                    st.caption(f"Debug: Peak {i+1} at x={info['x_linear']:.2f}, y={peak_y:.2f}")
+                    
+                    ax.plot(info['x_linear'], peak_y, 
                            'ro', markersize=8, markeredgecolor='darkred', 
-                           markerfacecolor='yellow')
-                    ax.text(info['x_linear'], peak_y_original * 1.05, 
+                           markerfacecolor='yellow', zorder=3)
+                    ax.text(info['x_linear'], peak_y * 1.05, 
                            f'{i+1}', ha='center', fontweight='bold', 
                            fontsize=12, bbox=dict(boxstyle="round,pad=0.3", 
-                                                 facecolor='white', alpha=0.8))
+                                                 facecolor='white', alpha=0.8),
+                           zorder=4)
                 
                 # Set labels exactly as in Step 2
                 x_label = 'X'
@@ -1165,6 +1210,12 @@ elif st.session_state.current_step == 3:
                 ax.set_title('Peak Detection - Same View as Step 2', fontsize=14, fontweight='bold')
                 ax.legend(loc='best', fontsize=10, frameon=True, edgecolor='black')
                 ax.grid(True, alpha=0.3, linestyle='--')
+                
+                # Set y-axis limits to match original data if needed
+                if not deconv.use_log_y:
+                    y_min = max(0, np.min(st.session_state.original_y) * 0.9)
+                    y_max = np.max(st.session_state.original_y) * 1.1
+                    ax.set_ylim(y_min, y_max)
                 
                 # Scientific styling
                 ax.spines['top'].set_visible(True)
@@ -1208,13 +1259,15 @@ elif st.session_state.current_step == 3:
                 # Create a table with peak information in original units
                 data = []
                 for i, info in enumerate(st.session_state.peak_info):
+                    # Get original Y value
+                    idx = np.argmin(np.abs(st.session_state.original_x - info['x_linear']))
+                    peak_y_original = st.session_state.original_y[idx]
+                    
                     data.append({
                         'Peak': i + 1,
                         'X Center': f"{info['x_linear']:.4e}",
-                        'Y Amplitude': f"{info['y'] * deconv.y_max:.4e}",
+                        'Y Amplitude': f"{peak_y_original:.4e}",
                         'Estimated Sigma': f"{info['sigma_est']:.4f}",
-                        'dy/dx': f"{info['dy']:.4e}",
-                        'd²y/dx²': f"{info['d2y']:.4e}"
                     })
                 
                 df = pd.DataFrame(data)
@@ -1227,9 +1280,9 @@ elif st.session_state.current_step == 3:
                 with col1:
                     st.metric("Total Peaks Found", len(st.session_state.peak_info))
                 with col2:
-                    st.metric("X Range", f"{deconv.x_linear[0]:.2e} - {deconv.x_linear[-1]:.2e}")
+                    st.metric("X Range", f"{np.min(st.session_state.original_x):.2e} - {np.max(st.session_state.original_x):.2e}")
                 with col3:
-                    st.metric("Y Range", f"{np.min(deconv.y_original):.2e} - {np.max(deconv.y_original):.2e}")
+                    st.metric("Y Range", f"{np.min(st.session_state.original_y):.2e} - {np.max(st.session_state.original_y):.2e}")
 
 # ==================== STEP 4: EDITING ====================
 
@@ -1551,6 +1604,7 @@ ID    Center          Amplitude       FWHM        Area           Fraction(%)
                             st.session_state[key] = None
                     st.session_state.current_step = 1
                     st.rerun()
+
 
 
 
