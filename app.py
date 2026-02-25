@@ -889,7 +889,8 @@ elif st.session_state.current_step == 4:
                               name=f'Пик {c["id"]} ({c["fraction_percent"]:.1f}%)',
                               line=dict(color=color_hex, width=1.5),
                               fill='tozeroy',
-                              fillcolor=color_hex + '40'),
+                              fillcolor=color_hex,
+                              fillopacity=0.3,
                     row=1, col=1
                 )
             
@@ -1156,4 +1157,5 @@ ID    Центр           Амплитуда       FWHM        Площадь  
                     if key in st.session_state:
                         st.session_state[key] = None
                 st.session_state.current_step = 1
+
                 st.rerun()
