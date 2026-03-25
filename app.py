@@ -13,6 +13,7 @@ import warnings
 from dataclasses import dataclass, field
 from typing import Optional, Tuple, List, Dict, Any, Callable
 import time
+from dataclasses import dataclass, field
 
 # ==================== STATE MANAGEMENT ====================
 
@@ -36,13 +37,13 @@ class AppState:
     x_range_max: Optional[float] = None
     clip_negative: bool = True
     fitting_method: str = 'trf'
-    max_nfev: int = 5000  # Уменьшено с 10000 для скорости
+    max_nfev: int = 5000
     show_warnings: bool = True
-    baseline_method: str = 'none'  # 'none', 'constant', 'linear', 'quadratic'
+    baseline_method: str = 'none'
     baseline_degree: int = 1
-    fit_quality: str = 'balanced'  # 'fast', 'balanced', 'precise'
-    last_popt: Optional[np.ndarray] = None  # Кэш последних параметров
-    pending_split: Optional[Tuple[int, float]] = None  # Ожидающие операции
+    fit_quality: str = 'balanced'
+    last_popt: Optional[np.ndarray] = None
+    pending_split: Optional[Tuple[int, float]] = None
     pending_remove: Optional[int] = None
     preview_mode: bool = False
     # Новые параметры для сглаживания и ручного добавления пиков
