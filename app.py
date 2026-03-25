@@ -1849,362 +1849,564 @@ if st.session_state.app_state.current_step == 1:
         )
         
         if st.button("📂 Load Data", type="primary", use_container_width=True):
-        x, y = DataParser.parse_text(data_text)
-        
-        if len(x) > 0:
-            st.session_state.app_state.raw_x = x
-            st.session_state.app_state.raw_y = y
-            st.session_state.app_state.x_range_min = float(np.min(x))
-            st.session_state.app_state.x_range_max = float(np.max(x))
-            st.session_state.app_state.current_step = 2
+            x, y = DataParser.parse_text(data_text)
+            
+            if len(x) > 0:
+                st.session_state.app_state.raw_x = x
+                st.session_state.app_state.raw_y = y
+                st.session_state.app_state.x_range_min = float(np.min(x))
+                st.session_state.app_state.x_range_max = float(np.max(x))
+                st.session_state.app_state.current_step = 2
+                st.rerun()
+            else:
+                st.error("Could not parse data. Check the format.")
+            
+            if st.session_state.app_state.raw_x is not None:
+            st.subheader("Data Preview:")
+            
+            plotter = SpectrumPlotter()
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+            
+            plotter.plot_raw_data(st.session_state.app_state.raw_x, 
+                             st.session_state.app_state.raw_y,
+                             use_log_x=False, use_log_y=False,
+                             title="Linear Scales", ax=ax1)
+            
+            if np.min(st.session_state.app_state.raw_x[st.session_state.app_state.raw_x > 0]) > 0:
+            plotter.plot_raw_data(st.session_state.app_state.raw_x, 
+                                 np.maximum(st.session_state.app_state.raw_y, 1e-12),
+                                 use_log_x=True, use_log_y=True,
+                                 title="Log-Log Scales", ax=ax2)
+            
+            plt.tight_layout()
+            st.pyplot(fig)
+            plt.close()
+            
+            
+            # ==================== STEP 2: SCALE SETTINGS ====================
+            
+            elif st.session_state.app_state.current_step == 2:
+            st.header("Step 2: Scale Settings")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+            st.subheader("Scale Parameters")
+            
+            if st.button("🔍 Auto-detect Scales", use_container_width=True):
+            suggest_log_x, suggest_log_y = DataParser.auto_detect_scale(
+                st.session_state.app_state.raw_x, 
+                st.session_state.app_state.raw_y
+            )
+            st.session_state.app_state.use_log_x = suggest_log_x
+            st.session_state.app_state.use_log_y = suggest_log_y
             st.rerun()
-        else:
-            st.error("Could not parse data. Check the format.")
-        
-        if st.session_state.app_state.raw_x is not None:
-        st.subheader("Data Preview:")
-        
-        plotter = SpectrumPlotter()
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
-        
-        plotter.plot_raw_data(st.session_state.app_state.raw_x, 
-                         st.session_state.app_state.raw_y,
-                         use_log_x=False, use_log_y=False,
-                         title="Linear Scales", ax=ax1)
-        
-        if np.min(st.session_state.app_state.raw_x[st.session_state.app_state.raw_x > 0]) > 0:
-        plotter.plot_raw_data(st.session_state.app_state.raw_x, 
-                             np.maximum(st.session_state.app_state.raw_y, 1e-12),
-                             use_log_x=True, use_log_y=True,
-                             title="Log-Log Scales", ax=ax2)
-        
-        plt.tight_layout()
-        st.pyplot(fig)
-        plt.close()
-        
-        
-        # ==================== STEP 2: SCALE SETTINGS ====================
-        
-        elif st.session_state.app_state.current_step == 2:
-        st.header("Step 2: Scale Settings")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-        st.subheader("Scale Parameters")
-        
-        if st.button("🔍 Auto-detect Scales", use_container_width=True):
-        suggest_log_x, suggest_log_y = DataParser.auto_detect_scale(
-            st.session_state.app_state.raw_x, 
-            st.session_state.app_state.raw_y
-        )
-        st.session_state.app_state.use_log_x = suggest_log_x
-        st.session_state.app_state.use_log_y = suggest_log_y
-        st.rerun()
-        
-        st.session_state.app_state.use_log_x = st.checkbox(
-        "Logarithmic X scale", 
-        value=st.session_state.app_state.use_log_x
-        )
-        st.session_state.app_state.use_log_y = st.checkbox(
-        "Logarithmic Y scale", 
-        value=st.session_state.app_state.use_log_y
-        )
-        
-        st.markdown("---")
-        st.subheader("Range Selection")
-        
-        x_min = float(np.min(st.session_state.app_state.raw_x))
-        x_max = float(np.max(st.session_state.app_state.raw_x))
-        
-        if st.session_state.app_state.x_range_min is None:
-        st.session_state.app_state.x_range_min = x_min
-        if st.session_state.app_state.x_range_max is None:
-        st.session_state.app_state.x_range_max = x_max
-        
-        range_values = st.slider(
-        "Select X-axis range:",
-        min_value=x_min,
-        max_value=x_max,
-        value=(st.session_state.app_state.x_range_min, 
-               st.session_state.app_state.x_range_max),
-        format="%.2e",
-        help="Drag the handles to select the region of interest"
-        )
-        
-        st.session_state.app_state.x_range_min = range_values[0]
-        st.session_state.app_state.x_range_max = range_values[1]
-        
-        mask = ((st.session_state.app_state.raw_x >= range_values[0]) & 
-            (st.session_state.app_state.raw_x <= range_values[1]))
-        points_in_range = np.sum(mask)
-        st.info(f"Points in selected range: {points_in_range} / {len(st.session_state.app_state.raw_x)}")
-        
-        st.markdown("---")
-        
-        col_a, col_b = st.columns(2)
-        with col_a:
-        if st.button("⬅️ Back", use_container_width=True):
-            st.session_state.app_state.current_step = 1
-            st.rerun()
-        with col_b:
-        if st.button("✅ Apply & Continue", type="primary", use_container_width=True):
-            x_range, y_range = DataParser.apply_range_selection(
-                st.session_state.app_state.raw_x,
-                st.session_state.app_state.raw_y,
-                st.session_state.app_state.x_range_min,
-                st.session_state.app_state.x_range_max
+            
+            st.session_state.app_state.use_log_x = st.checkbox(
+            "Logarithmic X scale", 
+            value=st.session_state.app_state.use_log_x
+            )
+            st.session_state.app_state.use_log_y = st.checkbox(
+            "Logarithmic Y scale", 
+            value=st.session_state.app_state.use_log_y
             )
             
-            st.session_state.app_state.raw_x = x_range
-            st.session_state.app_state.raw_y = y_range
+            st.markdown("---")
+            st.subheader("Range Selection")
             
-            st.session_state.app_state.current_step = 3
-            st.rerun()
-        
-        with col2:
-        st.subheader("Preview:")
-        
-        plotter = SpectrumPlotter()
-        fig, ax = plt.subplots(figsize=(8, 5))
-        
-        x_preview, y_preview = DataParser.apply_range_selection(
-        st.session_state.app_state.raw_x,
-        st.session_state.app_state.raw_y,
-        st.session_state.app_state.x_range_min,
-        st.session_state.app_state.x_range_max
-        )
-        
-        plotter.plot_raw_data(
-        x_preview, y_preview,
-        use_log_x=st.session_state.app_state.use_log_x,
-        use_log_y=st.session_state.app_state.use_log_y,
-        title="Selected Range Preview",
-        ax=ax
-        )
-        
-        if len(x_preview) < len(st.session_state.app_state.raw_x):
-        ax.axvspan(st.session_state.app_state.x_range_min,
-                  st.session_state.app_state.x_range_max,
-                  alpha=0.2, color='green', label='Selected Range')
-        
-        st.pyplot(fig)
-        plt.close()
-        
-        
-        # ==================== STEP 3: PEAK DETECTION ====================
-        
-        elif st.session_state.app_state.current_step == 3:
-        st.header("Step 3: Peak Detection")
-        
-        if st.session_state.app_state.deconvolver is None:
-        st.session_state.app_state.original_x = st.session_state.app_state.raw_x.copy()
-        st.session_state.app_state.original_y = st.session_state.app_state.raw_y.copy()
-        
-        if st.session_state.app_state.smoothing_enabled:
-        smoother = DataSmoother()
-        if st.session_state.app_state.smoothing_method == 'savgol':
-            y_smoothed = smoother.savgol_smooth(
-                st.session_state.app_state.raw_y,
-                st.session_state.app_state.smoothing_window,
-                st.session_state.app_state.smoothing_polyorder
-            )
-        elif st.session_state.app_state.smoothing_method == 'gaussian':
-            y_smoothed = smoother.gaussian_smooth(
-                st.session_state.app_state.raw_y,
-                st.session_state.app_state.smoothing_window
-            )
-        elif st.session_state.app_state.smoothing_method == 'median':
-            y_smoothed = smoother.median_smooth(
-                st.session_state.app_state.raw_y,
-                int(st.session_state.app_state.smoothing_window)
-            )
-        else:
-            y_smoothed = smoother.adaptive_smooth(st.session_state.app_state.raw_y)
-        
-        st.session_state.app_state.raw_y = y_smoothed
-        
-        st.session_state.app_state.deconvolver = GaussianDeconvolver(
-        st.session_state.app_state.raw_x,
-        st.session_state.app_state.raw_y,
-        use_log_x=st.session_state.app_state.use_log_x,
-        use_log_y=st.session_state.app_state.use_log_y,
-        clip_negative=st.session_state.app_state.clip_negative,
-        show_warnings=st.session_state.app_state.show_warnings,
-        baseline_method=st.session_state.app_state.baseline_method
-        )
-        
-        if st.session_state.app_state.deconvolver.clipped_points > 0:
-        st.warning(f"Clipped {st.session_state.app_state.deconvolver.clipped_points} negative values to 0")
-        if st.session_state.app_state.deconvolver.small_values_warning:
-        st.warning("Very small Y values detected. Log transformation may cause artifacts.")
-        
-        col1, col2 = st.columns([1, 2])
-        
-        with col1:
-        st.subheader("Search Parameters")
-        
-        st.session_state.app_state.sensitivity = st.slider(
-        "Sensitivity:",
-        min_value=0.001,
-        max_value=0.1,
-        value=st.session_state.app_state.sensitivity,
-        step=0.001,
-        format="%.3f"
-        )
-        
-        st.session_state.app_state.min_distance = st.slider(
-        "Minimum distance between peaks:",
-        min_value=1,
-        max_value=20,
-        value=st.session_state.app_state.min_distance,
-        step=1
-        )
-        
-        st.markdown("---")
-        st.subheader("✋ Manual Peak Addition")
-        
-        deconv = st.session_state.app_state.deconvolver
-        if deconv.use_log_x:
-        x_min_display = 10**np.min(deconv.x)
-        x_max_display = 10**np.max(deconv.x)
-        slider_min = x_min_display
-        slider_max = x_max_display
-        else:
-        slider_min = np.min(deconv.x)
-        slider_max = np.max(deconv.x)
-        
-        manual_position = st.slider(
-        "Select peak position:",
-        min_value=float(slider_min),
-        max_value=float(slider_max),
-        value=float(slider_min + (slider_max - slider_min) / 2),
-        step=float((slider_max - slider_min) / 200),
-        format="%.4e",
-        help="Drag slider to select peak position"
-        )
-        
-        st.session_state.app_state.manual_peak_position = manual_position
-        
-        col_manual1, col_manual2 = st.columns(2)
-        with col_manual1:
-        if st.button("➕ Add Manual Peak", use_container_width=True):
-            new_peak_info, new_params = deconv.add_manual_peak(manual_position)
+            x_min = float(np.min(st.session_state.app_state.raw_x))
+            x_max = float(np.max(st.session_state.app_state.raw_x))
             
-            if st.session_state.app_state.peak_info is None:
-                st.session_state.app_state.peak_info = []
-                st.session_state.app_state.initial_params = []
+            if st.session_state.app_state.x_range_min is None:
+            st.session_state.app_state.x_range_min = x_min
+            if st.session_state.app_state.x_range_max is None:
+            st.session_state.app_state.x_range_max = x_max
             
-            st.session_state.app_state.peak_info.append(new_peak_info)
-            st.session_state.app_state.initial_params.extend(new_params)
-            st.session_state.app_state.manual_peaks.append(manual_position)
-            st.success(f"Manual peak added at position {manual_position:.4e}")
-            st.rerun()
-        
-        with col_manual2:
-        if st.button("🗑️ Clear Manual Peaks", use_container_width=True):
-            if st.session_state.app_state.peak_info:
-                st.session_state.app_state.peak_info = [p for p in st.session_state.app_state.peak_info 
-                                                       if p.get('peak_type', 'auto') != 'manual']
-                st.session_state.app_state.manual_peaks = []
-                st.session_state.app_state.initial_params = []
-                _, auto_peaks, auto_params, _ = deconv.auto_detect_peaks(
-                    sensitivity=st.session_state.app_state.sensitivity,
-                    min_distance=st.session_state.app_state.min_distance
+            range_values = st.slider(
+            "Select X-axis range:",
+            min_value=x_min,
+            max_value=x_max,
+            value=(st.session_state.app_state.x_range_min, 
+                   st.session_state.app_state.x_range_max),
+            format="%.2e",
+            help="Drag the handles to select the region of interest"
+            )
+            
+            st.session_state.app_state.x_range_min = range_values[0]
+            st.session_state.app_state.x_range_max = range_values[1]
+            
+            mask = ((st.session_state.app_state.raw_x >= range_values[0]) & 
+                (st.session_state.app_state.raw_x <= range_values[1]))
+            points_in_range = np.sum(mask)
+            st.info(f"Points in selected range: {points_in_range} / {len(st.session_state.app_state.raw_x)}")
+            
+            st.markdown("---")
+            
+            col_a, col_b = st.columns(2)
+            with col_a:
+            if st.button("⬅️ Back", use_container_width=True):
+                st.session_state.app_state.current_step = 1
+                st.rerun()
+            with col_b:
+            if st.button("✅ Apply & Continue", type="primary", use_container_width=True):
+                x_range, y_range = DataParser.apply_range_selection(
+                    st.session_state.app_state.raw_x,
+                    st.session_state.app_state.raw_y,
+                    st.session_state.app_state.x_range_min,
+                    st.session_state.app_state.x_range_max
                 )
-                st.session_state.app_state.peak_info = auto_peaks
-                st.session_state.app_state.initial_params = auto_params
-            st.success("Manual peaks cleared")
-            st.rerun()
-        
-        st.markdown("---")
-        st.subheader("🔍 Residual Analysis")
-        
-        if st.button("🔎 Find Missing Peaks in Residuals", use_container_width=True):
-        with st.spinner("Analyzing residuals..."):
-            if not deconv.quality_metrics:
+                
+                st.session_state.app_state.raw_x = x_range
+                st.session_state.app_state.raw_y = y_range
+                
+                st.session_state.app_state.current_step = 3
+                st.rerun()
+            
+            with col2:
+            st.subheader("Preview:")
+            
+            plotter = SpectrumPlotter()
+            fig, ax = plt.subplots(figsize=(8, 5))
+            
+            x_preview, y_preview = DataParser.apply_range_selection(
+            st.session_state.app_state.raw_x,
+            st.session_state.app_state.raw_y,
+            st.session_state.app_state.x_range_min,
+            st.session_state.app_state.x_range_max
+            )
+            
+            plotter.plot_raw_data(
+            x_preview, y_preview,
+            use_log_x=st.session_state.app_state.use_log_x,
+            use_log_y=st.session_state.app_state.use_log_y,
+            title="Selected Range Preview",
+            ax=ax
+            )
+            
+            if len(x_preview) < len(st.session_state.app_state.raw_x):
+            ax.axvspan(st.session_state.app_state.x_range_min,
+                      st.session_state.app_state.x_range_max,
+                      alpha=0.2, color='green', label='Selected Range')
+            
+            st.pyplot(fig)
+            plt.close()
+            
+            
+            # ==================== STEP 3: PEAK DETECTION ====================
+            
+            elif st.session_state.app_state.current_step == 3:
+            st.header("Step 3: Peak Detection")
+            
+            if st.session_state.app_state.deconvolver is None:
+            st.session_state.app_state.original_x = st.session_state.app_state.raw_x.copy()
+            st.session_state.app_state.original_y = st.session_state.app_state.raw_y.copy()
+            
+            if st.session_state.app_state.smoothing_enabled:
+            smoother = DataSmoother()
+            if st.session_state.app_state.smoothing_method == 'savgol':
+                y_smoothed = smoother.savgol_smooth(
+                    st.session_state.app_state.raw_y,
+                    st.session_state.app_state.smoothing_window,
+                    st.session_state.app_state.smoothing_polyorder
+                )
+            elif st.session_state.app_state.smoothing_method == 'gaussian':
+                y_smoothed = smoother.gaussian_smooth(
+                    st.session_state.app_state.raw_y,
+                    st.session_state.app_state.smoothing_window
+                )
+            elif st.session_state.app_state.smoothing_method == 'median':
+                y_smoothed = smoother.median_smooth(
+                    st.session_state.app_state.raw_y,
+                    int(st.session_state.app_state.smoothing_window)
+                )
+            else:
+                y_smoothed = smoother.adaptive_smooth(st.session_state.app_state.raw_y)
+            
+            st.session_state.app_state.raw_y = y_smoothed
+            
+            st.session_state.app_state.deconvolver = GaussianDeconvolver(
+            st.session_state.app_state.raw_x,
+            st.session_state.app_state.raw_y,
+            use_log_x=st.session_state.app_state.use_log_x,
+            use_log_y=st.session_state.app_state.use_log_y,
+            clip_negative=st.session_state.app_state.clip_negative,
+            show_warnings=st.session_state.app_state.show_warnings,
+            baseline_method=st.session_state.app_state.baseline_method
+            )
+            
+            if st.session_state.app_state.deconvolver.clipped_points > 0:
+            st.warning(f"Clipped {st.session_state.app_state.deconvolver.clipped_points} negative values to 0")
+            if st.session_state.app_state.deconvolver.small_values_warning:
+            st.warning("Very small Y values detected. Log transformation may cause artifacts.")
+            
+            col1, col2 = st.columns([1, 2])
+            
+            with col1:
+            st.subheader("Search Parameters")
+            
+            st.session_state.app_state.sensitivity = st.slider(
+            "Sensitivity:",
+            min_value=0.001,
+            max_value=0.1,
+            value=st.session_state.app_state.sensitivity,
+            step=0.001,
+            format="%.3f"
+            )
+            
+            st.session_state.app_state.min_distance = st.slider(
+            "Minimum distance between peaks:",
+            min_value=1,
+            max_value=20,
+            value=st.session_state.app_state.min_distance,
+            step=1
+            )
+            
+            st.markdown("---")
+            st.subheader("✋ Manual Peak Addition")
+            
+            deconv = st.session_state.app_state.deconvolver
+            if deconv.use_log_x:
+            x_min_display = 10**np.min(deconv.x)
+            x_max_display = 10**np.max(deconv.x)
+            slider_min = x_min_display
+            slider_max = x_max_display
+            else:
+            slider_min = np.min(deconv.x)
+            slider_max = np.max(deconv.x)
+            
+            manual_position = st.slider(
+            "Select peak position:",
+            min_value=float(slider_min),
+            max_value=float(slider_max),
+            value=float(slider_min + (slider_max - slider_min) / 2),
+            step=float((slider_max - slider_min) / 200),
+            format="%.4e",
+            help="Drag slider to select peak position"
+            )
+            
+            st.session_state.app_state.manual_peak_position = manual_position
+            
+            col_manual1, col_manual2 = st.columns(2)
+            with col_manual1:
+            if st.button("➕ Add Manual Peak", use_container_width=True):
+                new_peak_info, new_params = deconv.add_manual_peak(manual_position)
+                
+                if st.session_state.app_state.peak_info is None:
+                    st.session_state.app_state.peak_info = []
+                    st.session_state.app_state.initial_params = []
+                
+                st.session_state.app_state.peak_info.append(new_peak_info)
+                st.session_state.app_state.initial_params.extend(new_params)
+                st.session_state.app_state.manual_peaks.append(manual_position)
+                st.success(f"Manual peak added at position {manual_position:.4e}")
+                st.rerun()
+            
+            with col_manual2:
+            if st.button("🗑️ Clear Manual Peaks", use_container_width=True):
                 if st.session_state.app_state.peak_info:
-                    initial_params = st.session_state.app_state.initial_params
-                    with st.spinner("Performing initial fit..."):
-                        success = deconv.fit(
-                            initial_params=initial_params,
-                            method=st.session_state.app_state.fitting_method,
-                            maxfev=st.session_state.app_state.max_nfev // 2,
-                            fit_quality='fast'
+                    st.session_state.app_state.peak_info = [p for p in st.session_state.app_state.peak_info 
+                                                           if p.get('peak_type', 'auto') != 'manual']
+                    st.session_state.app_state.manual_peaks = []
+                    st.session_state.app_state.initial_params = []
+                    _, auto_peaks, auto_params, _ = deconv.auto_detect_peaks(
+                        sensitivity=st.session_state.app_state.sensitivity,
+                        min_distance=st.session_state.app_state.min_distance
+                    )
+                    st.session_state.app_state.peak_info = auto_peaks
+                    st.session_state.app_state.initial_params = auto_params
+                st.success("Manual peaks cleared")
+                st.rerun()
+            
+            st.markdown("---")
+            st.subheader("🔍 Residual Analysis")
+            
+            if st.button("🔎 Find Missing Peaks in Residuals", use_container_width=True):
+            with st.spinner("Analyzing residuals..."):
+                if not deconv.quality_metrics:
+                    if st.session_state.app_state.peak_info:
+                        initial_params = st.session_state.app_state.initial_params
+                        with st.spinner("Performing initial fit..."):
+                            success = deconv.fit(
+                                initial_params=initial_params,
+                                method=st.session_state.app_state.fitting_method,
+                                maxfev=st.session_state.app_state.max_nfev // 2,
+                                fit_quality='fast'
+                            )
+                            if success:
+                                st.success("Initial fit completed")
+                            else:
+                                st.warning("Could not perform initial fit")
+                
+                if deconv.quality_metrics:
+                    residual_peaks = deconv.analyze_residuals_for_missing_peaks(
+                        sensitivity=st.session_state.app_state.sensitivity * 0.5,
+                        min_distance=st.session_state.app_state.min_distance
+                    )
+                    
+                    st.session_state.app_state.residual_peaks = residual_peaks
+                    st.session_state.app_state.residual_analysis_done = True
+                    
+                    if residual_peaks:
+                        st.success(f"Found {len(residual_peaks)} potential missing peaks")
+                    else:
+                        st.info("No additional peaks found in residuals")
+                else:
+                    st.warning("Please run peak detection first")
+            
+            if st.session_state.app_state.residual_peaks:
+            st.subheader("Suggested Peaks from Residuals")
+            for peak in st.session_state.app_state.residual_peaks:
+                col_res1, col_res2 = st.columns([3, 1])
+                with col_res1:
+                    st.write(f"Peak at X = {peak['x_linear']:.4e}, amp ≈ {peak['amplitude_est']:.4e}")
+                with col_res2:
+                    if st.button(f"Add", key=f"add_res_{peak['peak_id']}"):
+                        new_peak_info, new_params = deconv.add_manual_peak(
+                            peak['x_linear'],
+                            amplitude=peak['amplitude_est'],
+                            sigma=peak['sigma_est']
                         )
+                        st.session_state.app_state.peak_info.append(new_peak_info)
+                        st.session_state.app_state.initial_params.extend(new_params)
+                        st.session_state.app_state.residual_peaks = []
+                        st.success(f"Added peak at {peak['x_linear']:.4e}")
+                        st.rerun()
+            
+            st.markdown("---")
+            
+            col_a, col_b = st.columns(2)
+            with col_a:
+            if st.button("⬅️ Back", use_container_width=True):
+                st.session_state.app_state.current_step = 2
+                st.rerun()
+            with col_b:
+            if st.button("🔍 Find Peaks", type="primary", use_container_width=True):
+                with st.spinner("Detecting peaks..."):
+                    peaks, peak_info, initial_params, derivatives = st.session_state.app_state.deconvolver.auto_detect_peaks(
+                        sensitivity=st.session_state.app_state.sensitivity,
+                        min_distance=st.session_state.app_state.min_distance
+                    )
+                    
+                    if st.session_state.app_state.manual_peaks:
+                        for manual_peak in st.session_state.app_state.manual_peaks:
+                            new_info, new_params = deconv.add_manual_peak(manual_peak)
+                            peak_info.append(new_info)
+                            initial_params.extend(new_params)
+                    
+                    st.session_state.app_state.peak_info = peak_info
+                    st.session_state.app_state.derivatives = derivatives
+                    st.session_state.app_state.initial_params = initial_params
+                st.success(f"Found {len(peak_info)} peaks!")
+            
+            if st.session_state.app_state.peak_info is not None:
+            if st.button("✅ Confirm Peaks", use_container_width=True):
+                with st.spinner("Preparing preview..."):
+                    if st.session_state.app_state.preview_mode:
+                        st.session_state.app_state.current_step = 4
+                        st.rerun()
+                    else:
+                        progress_bar = st.progress(0)
+                        status_text = st.empty()
+                        
+                        def update_progress(progress, message):
+                            progress_bar.progress(progress)
+                            status_text.text(message)
+                        
+                        success = st.session_state.app_state.deconvolver.fit(
+                            initial_params=st.session_state.app_state.initial_params,
+                            method=st.session_state.app_state.fitting_method,
+                            maxfev=st.session_state.app_state.max_nfev,
+                            fit_quality=st.session_state.app_state.fit_quality,
+                            progress_callback=update_progress
+                        )
+                        
+                        progress_bar.empty()
+                        status_text.empty()
+                        
                         if success:
-                            st.success("Initial fit completed")
+                            st.session_state.app_state.last_popt = st.session_state.app_state.deconvolver.popt
+                            st.session_state.app_state.current_step = 4
+                            st.rerun()
                         else:
-                            st.warning("Could not perform initial fit")
+                            st.error("Fitting failed. Try adjusting parameters.")
+            
+            with col2:
+            if st.session_state.app_state.peak_info is not None:
+            st.subheader(f"Peaks found: {len(st.session_state.app_state.peak_info)}")
+            
+            if st.session_state.app_state.show_smoothing_preview and st.session_state.app_state.smoothing_enabled:
+                st.info(f"Smoothing applied: {st.session_state.app_state.smoothing_method}")
+            
+            dy, d2y, y_smooth = st.session_state.app_state.derivatives
+            deconv = st.session_state.app_state.deconvolver
+            plotter = SpectrumPlotter()
+            
+            tab1, tab2, tab3, tab4 = st.tabs(["📊 Peaks", "📈 Derivatives", "📋 Information", "🔍 Residuals"])
+            
+            with tab1:
+                fig, ax = plt.subplots(figsize=(10, 6))
+                plotter.plot_with_peaks(
+                    deconv, 
+                    st.session_state.app_state.peak_info, 
+                    y_smooth,
+                    title=f"Peak Detection - {len(st.session_state.app_state.peak_info)} peaks found",
+                    ax=ax,
+                    manual_peak_position=st.session_state.app_state.manual_peak_position,
+                    manual_peak_marker=True
+                )
+                st.pyplot(fig)
+                plt.close()
+            
+            with tab2:
+                fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6))
+                
+                ax1.plot(deconv.x, dy, 'b-', linewidth=1.5, label='First derivative')
+                ax1.axhline(y=0, color='r', linestyle='--', alpha=0.5)
+                ax1.set_xlabel(deconv.x_label)
+                ax1.set_ylabel('dy/dx')
+                ax1.set_title('First Derivative')
+                ax1.grid(True, alpha=0.3)
+                ax1.legend()
+                
+                ax2.plot(deconv.x, d2y, 'g-', linewidth=1.5, label='Second derivative')
+                ax2.axhline(y=0, color='r', linestyle='--', alpha=0.5)
+                ax2.set_xlabel(deconv.x_label)
+                ax2.set_ylabel('d²y/dx²')
+                ax2.set_title('Second Derivative')
+                ax2.grid(True, alpha=0.3)
+                ax2.legend()
+                
+                plt.tight_layout()
+                st.pyplot(fig)
+                plt.close()
+            
+            with tab3:
+                data = []
+                for i, info in enumerate(st.session_state.app_state.peak_info):
+                    peak_type = info.get('peak_type', 'auto')
+                    type_icon = "🟢" if peak_type == 'auto' else "🟠" if peak_type == 'manual' else "🔵"
+                    data.append({
+                        'Peak': i + 1,
+                        'Type': f"{type_icon} {peak_type}",
+                        'X Center': f"{info['x_linear']:.4e}",
+                        'Y Amplitude': f"{info['y_original']:.4e}",
+                        'Estimated Sigma': f"{info['sigma_est']:.4f}",
+                    })
+                
+                df = pd.DataFrame(data)
+                st.dataframe(df, use_container_width=True)
+                
+                st.markdown("---")
+                st.subheader("Detection Statistics")
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Total Peaks Found", len(st.session_state.app_state.peak_info))
+                with col2:
+                    auto_count = sum(1 for p in st.session_state.app_state.peak_info if p.get('peak_type', 'auto') == 'auto')
+                    st.metric("Auto-detected", auto_count)
+                with col3:
+                    manual_count = sum(1 for p in st.session_state.app_state.peak_info if p.get('peak_type') == 'manual')
+                    st.metric("Manual", manual_count)
+                with col4:
+                    residual_count = sum(1 for p in st.session_state.app_state.peak_info if p.get('peak_type') == 'residual')
+                    st.metric("From Residuals", residual_count)
+                
+                st.markdown("---")
+                st.subheader("Peak Type Legend")
+                st.markdown("🟢 **Green** - Auto-detected peaks (standard algorithm)")
+                st.markdown("🟠 **Orange** - Manually added peaks (user-selected)")
+                st.markdown("🔵 **Blue** - Residual-based peaks (found in fit residuals)")
+            
+            with tab4:
+                if st.session_state.app_state.residual_analysis_done and st.session_state.app_state.residual_peaks:
+                    fig, ax = plt.subplots(figsize=(10, 6))
+                    plotter.plot_residual_analysis(
+                        deconv,
+                        st.session_state.app_state.residual_peaks,
+                        title="Residual Analysis - Potential Missing Peaks",
+                        ax=ax
+                    )
+                    st.pyplot(fig)
+                    plt.close()
+                    
+                    st.info("Blue markers indicate potential missing peaks detected in residuals")
+                else:
+                    st.info("Click 'Find Missing Peaks in Residuals' to analyze fit residuals")
+            
+            
+            # ==================== STEP 4: EDITING ====================
+            
+            elif st.session_state.app_state.current_step == 4:
+            st.header("Step 4: Peak Editing")
+            
+            if st.session_state.app_state.deconvolver:
+            deconv = st.session_state.app_state.deconvolver
+            plotter = SpectrumPlotter()
+            
+            col1, col2 = st.columns([1, 2])
+            
+            with col1:
+            st.subheader("Peak Management")
+            
+            if st.session_state.app_state.pending_remove is not None:
+                st.warning(f"Pending: Remove Peak {st.session_state.app_state.pending_remove}")
+            if st.session_state.app_state.pending_split is not None:
+                st.warning(f"Pending: Split Peak {st.session_state.app_state.pending_split[0]}")
             
             if deconv.quality_metrics:
-                residual_peaks = deconv.analyze_residuals_for_missing_peaks(
-                    sensitivity=st.session_state.app_state.sensitivity * 0.5,
-                    min_distance=st.session_state.app_state.min_distance
+                metrics = deconv.quality_metrics
+                st.info(f"R² = {metrics.get('R²', 0):.4f} | RMSE = {metrics.get('RMSE', 0):.2e}")
+            
+            st.markdown("---")
+            
+            if st.session_state.app_state.preview_mode:
+                st.info("🔍 PREVIEW MODE - No fitting performed")
+            
+            if deconv.components:
+                peak_options = {f"Peak {c['id']}: center = {c['cen_linear']:.2e}, fraction = {c['fraction_percent']:.1f}%": c['id'] 
+                               for c in deconv.components}
+                
+                selected_peak = st.selectbox(
+                    "Select peak for editing:",
+                    options=list(peak_options.keys())
                 )
                 
-                st.session_state.app_state.residual_peaks = residual_peaks
-                st.session_state.app_state.residual_analysis_done = True
-                
-                if residual_peaks:
-                    st.success(f"Found {len(residual_peaks)} potential missing peaks")
-                else:
-                    st.info("No additional peaks found in residuals")
-            else:
-                st.warning("Please run peak detection first")
-        
-        if st.session_state.app_state.residual_peaks:
-        st.subheader("Suggested Peaks from Residuals")
-        for peak in st.session_state.app_state.residual_peaks:
-            col_res1, col_res2 = st.columns([3, 1])
-            with col_res1:
-                st.write(f"Peak at X = {peak['x_linear']:.4e}, amp ≈ {peak['amplitude_est']:.4e}")
-            with col_res2:
-                if st.button(f"Add", key=f"add_res_{peak['peak_id']}"):
-                    new_peak_info, new_params = deconv.add_manual_peak(
-                        peak['x_linear'],
-                        amplitude=peak['amplitude_est'],
-                        sigma=peak['sigma_est']
+                if selected_peak:
+                    peak_id = peak_options[selected_peak]
+                    
+                    peak = deconv.components[peak_id - 1]
+                    min_x = np.min(deconv.x)
+                    max_x = np.max(deconv.x)
+                    default_pos = peak['cen_log']
+                    
+                    split_position = st.slider(
+                        "Split position:",
+                        min_value=float(min_x),
+                        max_value=float(max_x),
+                        value=float(default_pos),
+                        format="%.4f"
                     )
-                    st.session_state.app_state.peak_info.append(new_peak_info)
-                    st.session_state.app_state.initial_params.extend(new_params)
-                    st.session_state.app_state.residual_peaks = []
-                    st.success(f"Added peak at {peak['x_linear']:.4e}")
-                    st.rerun()
-        
-        st.markdown("---")
-        
-        col_a, col_b = st.columns(2)
-        with col_a:
-        if st.button("⬅️ Back", use_container_width=True):
-            st.session_state.app_state.current_step = 2
-            st.rerun()
-        with col_b:
-        if st.button("🔍 Find Peaks", type="primary", use_container_width=True):
-            with st.spinner("Detecting peaks..."):
-                peaks, peak_info, initial_params, derivatives = st.session_state.app_state.deconvolver.auto_detect_peaks(
-                    sensitivity=st.session_state.app_state.sensitivity,
-                    min_distance=st.session_state.app_state.min_distance
-                )
-                
-                if st.session_state.app_state.manual_peaks:
-                    for manual_peak in st.session_state.app_state.manual_peaks:
-                        new_info, new_params = deconv.add_manual_peak(manual_peak)
-                        peak_info.append(new_info)
-                        initial_params.extend(new_params)
-                
-                st.session_state.app_state.peak_info = peak_info
-                st.session_state.app_state.derivatives = derivatives
-                st.session_state.app_state.initial_params = initial_params
-            st.success(f"Found {len(peak_info)} peaks!")
-        
-        if st.session_state.app_state.peak_info is not None:
-        if st.button("✅ Confirm Peaks", use_container_width=True):
-            with st.spinner("Preparing preview..."):
-                if st.session_state.app_state.preview_mode:
-                    st.session_state.app_state.current_step = 4
-                    st.rerun()
-                else:
+                    
+                    col_a, col_b = st.columns(2)
+                    
+                    with col_a:
+                        if st.button("✂️ Split Peak", use_container_width=True):
+                            if deconv.split_peak(peak_id, split_position):
+                                st.success(f"Peak {peak_id} marked for splitting")
+                                st.rerun()
+                    
+                    with col_b:
+                        if st.button("🗑️ Remove Peak", use_container_width=True):
+                            if deconv.remove_peak(peak_id):
+                                st.success(f"Peak {peak_id} marked for removal")
+                                st.rerun()
+            else:
+                st.warning("No peaks to edit. Run peak detection first.")
+            
+            st.markdown("---")
+            
+            if st.button("🔄 Apply Changes and Recalculate", type="primary", use_container_width=True):
+                with st.spinner("Applying changes and recalculating..."):
                     progress_bar = st.progress(0)
                     status_text = st.empty()
                     
@@ -2212,739 +2414,105 @@ if st.session_state.app_state.current_step == 1:
                         progress_bar.progress(progress)
                         status_text.text(message)
                     
-                    success = st.session_state.app_state.deconvolver.fit(
-                        initial_params=st.session_state.app_state.initial_params,
-                        method=st.session_state.app_state.fitting_method,
-                        maxfev=st.session_state.app_state.max_nfev,
-                        fit_quality=st.session_state.app_state.fit_quality,
-                        progress_callback=update_progress
-                    )
-                    
-                    progress_bar.empty()
-                    status_text.empty()
-                    
-                    if success:
-                        st.session_state.app_state.last_popt = st.session_state.app_state.deconvolver.popt
-                        st.session_state.app_state.current_step = 4
+                    if st.session_state.app_state.preview_mode:
+                        preview_fit = deconv.preview_fit()
+                        if preview_fit is not None:
+                            st.session_state.app_state.preview_fit = preview_fit
+                            st.success("Preview updated")
+                        progress_bar.empty()
+                        status_text.empty()
                         st.rerun()
                     else:
-                        st.error("Fitting failed. Try adjusting parameters.")
-        
-        with col2:
-        if st.session_state.app_state.peak_info is not None:
-        st.subheader(f"Peaks found: {len(st.session_state.app_state.peak_info)}")
-        
-        if st.session_state.app_state.show_smoothing_preview and st.session_state.app_state.smoothing_enabled:
-            st.info(f"Smoothing applied: {st.session_state.app_state.smoothing_method}")
-        
-        dy, d2y, y_smooth = st.session_state.app_state.derivatives
-        deconv = st.session_state.app_state.deconvolver
-        plotter = SpectrumPlotter()
-        
-        tab1, tab2, tab3, tab4 = st.tabs(["📊 Peaks", "📈 Derivatives", "📋 Information", "🔍 Residuals"])
-        
-        with tab1:
-            fig, ax = plt.subplots(figsize=(10, 6))
-            plotter.plot_with_peaks(
-                deconv, 
-                st.session_state.app_state.peak_info, 
-                y_smooth,
-                title=f"Peak Detection - {len(st.session_state.app_state.peak_info)} peaks found",
-                ax=ax,
-                manual_peak_position=st.session_state.app_state.manual_peak_position,
-                manual_peak_marker=True
-            )
-            st.pyplot(fig)
-            plt.close()
-        
-        with tab2:
-            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6))
+                        success = deconv.apply_pending_operations(
+                            fit_quality=st.session_state.app_state.fit_quality,
+                            progress_callback=update_progress
+                        )
+                        
+                        progress_bar.empty()
+                        status_text.empty()
+                        
+                        if success:
+                            st.session_state.app_state.last_popt = deconv.popt
+                            st.success("Recalculation complete!")
+                            st.rerun()
+                        else:
+                            st.error("Recalculation failed")
             
-            ax1.plot(deconv.x, dy, 'b-', linewidth=1.5, label='First derivative')
-            ax1.axhline(y=0, color='r', linestyle='--', alpha=0.5)
-            ax1.set_xlabel(deconv.x_label)
-            ax1.set_ylabel('dy/dx')
-            ax1.set_title('First Derivative')
-            ax1.grid(True, alpha=0.3)
-            ax1.legend()
-            
-            ax2.plot(deconv.x, d2y, 'g-', linewidth=1.5, label='Second derivative')
-            ax2.axhline(y=0, color='r', linestyle='--', alpha=0.5)
-            ax2.set_xlabel(deconv.x_label)
-            ax2.set_ylabel('d²y/dx²')
-            ax2.set_title('Second Derivative')
-            ax2.grid(True, alpha=0.3)
-            ax2.legend()
-            
-            plt.tight_layout()
-            st.pyplot(fig)
-            plt.close()
-        
-        with tab3:
-            data = []
-            for i, info in enumerate(st.session_state.app_state.peak_info):
-                peak_type = info.get('peak_type', 'auto')
-                type_icon = "🟢" if peak_type == 'auto' else "🟠" if peak_type == 'manual' else "🔵"
-                data.append({
-                    'Peak': i + 1,
-                    'Type': f"{type_icon} {peak_type}",
-                    'X Center': f"{info['x_linear']:.4e}",
-                    'Y Amplitude': f"{info['y_original']:.4e}",
-                    'Estimated Sigma': f"{info['sigma_est']:.4f}",
-                })
-            
-            df = pd.DataFrame(data)
-            st.dataframe(df, use_container_width=True)
+            if st.button("🔄 Clear Pending Operations", use_container_width=True):
+                st.session_state.app_state.pending_remove = None
+                st.session_state.app_state.pending_split = None
+                st.rerun()
             
             st.markdown("---")
-            st.subheader("Detection Statistics")
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("Total Peaks Found", len(st.session_state.app_state.peak_info))
+            
+            col_a, col_b = st.columns(2)
+            with col_a:
+                if st.button("⬅️ Back", use_container_width=True):
+                    st.session_state.app_state.current_step = 3
+                    st.rerun()
+            with col_b:
+                if st.button("✅ Finish Editing", use_container_width=True):
+                    st.session_state.app_state.current_step = 5
+                    st.rerun()
+            
             with col2:
-                auto_count = sum(1 for p in st.session_state.app_state.peak_info if p.get('peak_type', 'auto') == 'auto')
-                st.metric("Auto-detected", auto_count)
-            with col3:
-                manual_count = sum(1 for p in st.session_state.app_state.peak_info if p.get('peak_type') == 'manual')
-                st.metric("Manual", manual_count)
-            with col4:
-                residual_count = sum(1 for p in st.session_state.app_state.peak_info if p.get('peak_type') == 'residual')
-                st.metric("From Residuals", residual_count)
+            st.subheader("Current Deconvolution")
             
-            st.markdown("---")
-            st.subheader("Peak Type Legend")
-            st.markdown("🟢 **Green** - Auto-detected peaks (standard algorithm)")
-            st.markdown("🟠 **Orange** - Manually added peaks (user-selected)")
-            st.markdown("🔵 **Blue** - Residual-based peaks (found in fit residuals)")
-        
-        with tab4:
-            if st.session_state.app_state.residual_analysis_done and st.session_state.app_state.residual_peaks:
+            if st.session_state.app_state.preview_mode and hasattr(st.session_state.app_state, 'preview_fit'):
                 fig, ax = plt.subplots(figsize=(10, 6))
-                plotter.plot_residual_analysis(
+                plotter.plot_deconvolution_result(
                     deconv,
-                    st.session_state.app_state.residual_peaks,
-                    title="Residual Analysis - Potential Missing Peaks",
+                    show_components=True,
+                    show_baseline=True,
+                    title="Preview (no fit performed)",
+                    ax=ax,
+                    preview_mode=True,
+                    preview_fit=st.session_state.app_state.preview_fit
+                )
+                st.pyplot(fig)
+                plt.close()
+            elif deconv.components:
+                fig, ax = plt.subplots(figsize=(10, 6))
+                plotter.plot_deconvolution_result(
+                    deconv,
+                    show_components=True,
+                    show_baseline=True,
+                    title="Current Deconvolution",
                     ax=ax
                 )
                 st.pyplot(fig)
                 plt.close()
-                
-                st.info("Blue markers indicate potential missing peaks detected in residuals")
             else:
-                st.info("Click 'Find Missing Peaks in Residuals' to analyze fit residuals")
-        
-        
-        # ==================== STEP 4: EDITING ====================
-        
-        elif st.session_state.app_state.current_step == 4:
-        st.header("Step 4: Peak Editing")
-        
-        if st.session_state.app_state.deconvolver:
-        deconv = st.session_state.app_state.deconvolver
-        plotter = SpectrumPlotter()
-        
-        col1, col2 = st.columns([1, 2])
-        
-        with col1:
-        st.subheader("Peak Management")
-        
-        if st.session_state.app_state.pending_remove is not None:
-            st.warning(f"Pending: Remove Peak {st.session_state.app_state.pending_remove}")
-        if st.session_state.app_state.pending_split is not None:
-            st.warning(f"Pending: Split Peak {st.session_state.app_state.pending_split[0]}")
-        
-        if deconv.quality_metrics:
-            metrics = deconv.quality_metrics
-            st.info(f"R² = {metrics.get('R²', 0):.4f} | RMSE = {metrics.get('RMSE', 0):.2e}")
-        
-        st.markdown("---")
-        
-        if st.session_state.app_state.preview_mode:
-            st.info("🔍 PREVIEW MODE - No fitting performed")
-        
-        if deconv.components:
-            peak_options = {f"Peak {c['id']}: center = {c['cen_linear']:.2e}, fraction = {c['fraction_percent']:.1f}%": c['id'] 
-                           for c in deconv.components}
+                st.info("No components to display. Run peak detection first.")
             
-            selected_peak = st.selectbox(
-                "Select peak for editing:",
-                options=list(peak_options.keys())
-            )
             
-            if selected_peak:
-                peak_id = peak_options[selected_peak]
-                
-                peak = deconv.components[peak_id - 1]
-                min_x = np.min(deconv.x)
-                max_x = np.max(deconv.x)
-                default_pos = peak['cen_log']
-                
-                split_position = st.slider(
-                    "Split position:",
-                    min_value=float(min_x),
-                    max_value=float(max_x),
-                    value=float(default_pos),
-                    format="%.4f"
-                )
-                
-                col_a, col_b = st.columns(2)
-                
-                with col_a:
-                    if st.button("✂️ Split Peak", use_container_width=True):
-                        if deconv.split_peak(peak_id, split_position):
-                            st.success(f"Peak {peak_id} marked for splitting")
-                            st.rerun()
-                
-                with col_b:
-                    if st.button("🗑️ Remove Peak", use_container_width=True):
-                        if deconv.remove_peak(peak_id):
-                            st.success(f"Peak {peak_id} marked for removal")
-                            st.rerun()
-        else:
-            st.warning("No peaks to edit. Run peak detection first.")
-        
-        st.markdown("---")
-        
-        if st.button("🔄 Apply Changes and Recalculate", type="primary", use_container_width=True):
-            with st.spinner("Applying changes and recalculating..."):
-                progress_bar = st.progress(0)
-                status_text = st.empty()
-                
-                def update_progress(progress, message):
-                    progress_bar.progress(progress)
-                    status_text.text(message)
-                
-                if st.session_state.app_state.preview_mode:
-                    preview_fit = deconv.preview_fit()
-                    if preview_fit is not None:
-                        st.session_state.app_state.preview_fit = preview_fit
-                        st.success("Preview updated")
-                    progress_bar.empty()
-                    status_text.empty()
-                    st.rerun()
-                else:
-                    success = deconv.apply_pending_operations(
-                        fit_quality=st.session_state.app_state.fit_quality,
-                        progress_callback=update_progress
-                    )
-                    
-                    progress_bar.empty()
-                    status_text.empty()
-                    
-                    if success:
-                        st.session_state.app_state.last_popt = deconv.popt
-                        st.success("Recalculation complete!")
-                        st.rerun()
-                    else:
-                        st.error("Recalculation failed")
-        
-        if st.button("🔄 Clear Pending Operations", use_container_width=True):
-            st.session_state.app_state.pending_remove = None
-            st.session_state.app_state.pending_split = None
-            st.rerun()
-        
-        st.markdown("---")
-        
-        col_a, col_b = st.columns(2)
-        with col_a:
-            if st.button("⬅️ Back", use_container_width=True):
-                st.session_state.app_state.current_step = 3
+            # ==================== STEP 5: RESULTS ====================
+            
+            elif st.session_state.app_state.current_step == 5:
+            st.header("Step 5: Results")
+            
+            if st.session_state.app_state.deconvolver and st.session_state.app_state.deconvolver.components:
+            deconv = st.session_state.app_state.deconvolver
+            
+            col_back, _ = st.columns([1, 5])
+            with col_back:
+            if st.button("⬅️ Back to Editing", use_container_width=True):
+                st.session_state.app_state.current_step = 4
                 st.rerun()
-        with col_b:
-            if st.button("✅ Finish Editing", use_container_width=True):
-                st.session_state.app_state.current_step = 5
-                st.rerun()
-        
-        with col2:
-        st.subheader("Current Deconvolution")
-        
-        if st.session_state.app_state.preview_mode and hasattr(st.session_state.app_state, 'preview_fit'):
-            fig, ax = plt.subplots(figsize=(10, 6))
-            plotter.plot_deconvolution_result(
-                deconv,
-                show_components=True,
-                show_baseline=True,
-                title="Preview (no fit performed)",
-                ax=ax,
-                preview_mode=True,
-                preview_fit=st.session_state.app_state.preview_fit
-            )
-            st.pyplot(fig)
-            plt.close()
-        elif deconv.components:
-            fig, ax = plt.subplots(figsize=(10, 6))
-            plotter.plot_deconvolution_result(
-                deconv,
-                show_components=True,
-                show_baseline=True,
-                title="Current Deconvolution",
-                ax=ax
-            )
-            st.pyplot(fig)
-            plt.close()
-        else:
-            st.info("No components to display. Run peak detection first.")
-        
-        
-        # ==================== STEP 5: RESULTS ====================
-        
-        elif st.session_state.app_state.current_step == 5:
-        st.header("Step 5: Results")
-        
-        if st.session_state.app_state.deconvolver and st.session_state.app_state.deconvolver.components:
-        deconv = st.session_state.app_state.deconvolver
-        
-        col_back, _ = st.columns([1, 5])
-        with col_back:
-        if st.button("⬅️ Back to Editing", use_container_width=True):
-            st.session_state.app_state.current_step = 4
-            st.rerun()
-        
-        st.markdown("---")
-        
-        tab1, tab2, tab3, tab4 = st.tabs(["📊 Graphs", "📈 Normalized View", "📋 Table", "📥 Export"])
-        
-        with tab1:
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.subheader("Deconvolution Result (Original Scale)")
             
-            plotter = SpectrumPlotter()
-            fig, ax = plt.subplots(figsize=(10, 6))
+            st.markdown("---")
             
-            plotter.plot_deconvolution_result(
-                deconv,
-                show_components=True,
-                show_baseline=True,
-                title="Deconvolution Result - Original Scale",
-                ax=ax
-            )
+            tab1, tab2, tab3, tab4 = st.tabs(["📊 Graphs", "📈 Normalized View", "📋 Table", "📥 Export"])
             
-            st.pyplot(fig)
-            plt.close()
-        
-        with col2:
-            st.subheader("Area Distribution Analysis")
+            with tab1:
+            col1, col2 = st.columns(2)
             
-            fig = plt.figure(figsize=(12, 10))
-            
-            ax1 = plt.subplot(2, 2, 1)
-            peaks = [f'Peak {c["id"]}' for c in deconv.components]
-            areas = [c['area'] for c in deconv.components]
-            fractions = [c['fraction_percent'] for c in deconv.components]
-            colors = plt.cm.Set3(np.linspace(0, 1, len(peaks)))
-            
-            bars1 = ax1.bar(peaks, areas, color=colors, edgecolor='black', alpha=0.7)
-            ax1.set_xlabel('Peak', fontweight='bold')
-            ax1.set_ylabel('Area', fontweight='bold')
-            ax1.set_title('Peak Areas', fontweight='bold')
-            ax1.tick_params(axis='x', rotation=45)
-            ax1.grid(True, alpha=0.3, axis='y')
-            
-            for bar, area in zip(bars1, areas):
-                height = bar.get_height()
-                ax1.text(bar.get_x() + bar.get_width()/2., height,
-                        f'{area:.2e}',
-                        ha='center', va='bottom', fontsize=8, rotation=0)
-            
-            ax2 = plt.subplot(2, 2, 2)
-            bars2 = ax2.bar(peaks, fractions, color=colors, edgecolor='black', alpha=0.7)
-            ax2.set_xlabel('Peak', fontweight='bold')
-            ax2.set_ylabel('Fraction (%)', fontweight='bold')
-            ax2.set_title('Peak Fractions', fontweight='bold')
-            ax2.tick_params(axis='x', rotation=45)
-            ax2.grid(True, alpha=0.3, axis='y')
-            
-            for bar, frac in zip(bars2, fractions):
-                height = bar.get_height()
-                ax2.text(bar.get_x() + bar.get_width()/2., height,
-                        f'{frac:.1f}%',
-                        ha='center', va='bottom', fontsize=8)
-            
-            ax3 = plt.subplot(2, 2, 3)
-            wedges, texts, autotexts = ax3.pie(fractions, labels=peaks, autopct='%1.1f%%',
-                   colors=colors, startangle=90,
-                   textprops={'fontweight': 'bold'})
-            ax3.set_title('Area Distribution - Pie Chart', fontweight='bold')
-            
-            ax4 = plt.subplot(2, 2, 4)
-            y_pos = np.arange(len(peaks))
-            bars4 = ax4.barh(y_pos, fractions, color=colors, edgecolor='black', alpha=0.7)
-            ax4.set_yticks(y_pos)
-            ax4.set_yticklabels(peaks)
-            ax4.set_xlabel('Fraction (%)', fontweight='bold')
-            ax4.set_title('Peak Fractions - Horizontal View', fontweight='bold')
-            ax4.grid(True, alpha=0.3, axis='x')
-            
-            for bar, frac in zip(bars4, fractions):
-                width = bar.get_width()
-                ax4.text(width + 0.5, bar.get_y() + bar.get_height()/2.,
-                        f'{frac:.1f}%',
-                        ha='left', va='center', fontsize=8)
-            
-            plt.tight_layout()
-            st.pyplot(fig)
-            plt.close()
-        
-        st.markdown("---")
-        st.subheader("Summary Statistics")
-        
-        col_sum1, col_sum2, col_sum3, col_sum4 = st.columns(4)
-        
-        with col_sum1:
-            total_area = sum([c['area'] for c in deconv.components])
-            st.metric("Total Area", f"{total_area:.4e}")
-        
-        with col_sum2:
-            n_peaks = len(deconv.components)
-            st.metric("Number of Peaks", f"{n_peaks}")
-        
-        with col_sum3:
-            max_fraction_peak = max(enumerate(deconv.components), key=lambda x: x[1]['fraction'])
-            st.metric("Dominant Peak", f"Peak {max_fraction_peak[1]['id']} ({max_fraction_peak[1]['fraction_percent']:.1f}%)")
-        
-        with col_sum4:
-            avg_area = total_area / n_peaks if n_peaks > 0 else 0
-            st.metric("Average Area", f"{avg_area:.4e}")
-        
-        with tab2:
-        st.subheader("Normalized View (Max Peak Intensity = 1)")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            max_amp = max([c['amp'] for c in deconv.components])
-            
-            fig_norm, ax_norm = plt.subplots(figsize=(10, 6))
-            
-            if deconv.use_log_x:
-                ax_norm.set_xscale('log')
-            
-            if deconv.use_log_x:
-                x_min = np.maximum(np.min(deconv.x_linear[deconv.x_linear>0]), np.finfo(float).eps)
-                x_max = np.max(deconv.x_linear)
-                x_dense = np.logspace(np.log10(x_min), np.log10(x_max), 2000)
-                x_dense_log = np.log10(x_dense)
-            else:
-                x_dense = np.linspace(np.min(deconv.x_linear), np.max(deconv.x_linear), 2000)
-                x_dense_log = x_dense
-            
-            colors = plt.cm.Set3(np.linspace(0, 1, len(deconv.components)))
-            for c, color in zip(deconv.components, colors):
-                y_component_norm = GaussianModel.gaussian(x_dense_log, c['amp_norm'], 
-                                                        c['cen_log'], c['sigma_log']) 
-                y_component_norm = y_component_norm * deconv.y_max / max_amp
+            with col1:
+                st.subheader("Deconvolution Result (Original Scale)")
                 
-                ax_norm.fill_between(x_dense, 0, y_component_norm, 
-                                    color=color, alpha=0.3, linewidth=0)
+                plotter = SpectrumPlotter()
+                fig, ax = plt.subplots(figsize=(10, 6))
                 
-                ax_norm.plot(x_dense, y_component_norm, '-', color=color, linewidth=2,
-                           label=f'Peak {c["id"]}: {c["fraction_percent"]:.1f}%', zorder=2)
-            
-            if deconv.baseline_method != 'none' and deconv.baseline_params:
-                n_peaks = len(deconv.components)
-                peak_params = []
-                for c in deconv.components:
-                    peak_params.extend([c['amp_norm'], c['cen_log'], c['sigma_log']])
-                
-                y_total_norm = GaussianModel.multi_gaussian_with_baseline(
-                    x_dense_log, n_peaks, peak_params, 
-                    deconv.baseline_params, deconv.baseline_method
-                ) * deconv.y_max / max_amp
-            else:
-                y_total_norm = GaussianModel.multi_gaussian(x_dense_log, *deconv.popt) * deconv.y_max / max_amp
-            
-            ax_norm.plot(x_dense, y_total_norm, 'r--', linewidth=2, label='Total Fit', zorder=3)
-            
-            y_original_norm = deconv.y_original / max_amp
-            ax_norm.scatter(deconv.x_linear, y_original_norm, 
-                           s=10, alpha=0.5, color='black', label='Data', zorder=1)
-            
-            x_label = 'X' + (' (log scale)' if deconv.use_log_x else '')
-            y_label = 'Normalized Intensity'
-            ax_norm.set_xlabel(x_label, fontsize=12, fontweight='bold')
-            ax_norm.set_ylabel(y_label, fontsize=12, fontweight='bold')
-            ax_norm.set_title('Deconvolution Result - Normalized to Max Peak = 1', fontsize=14, fontweight='bold')
-            
-            if deconv.quality_metrics:
-                metrics_text = f"R² = {deconv.quality_metrics.get('R²', 0):.4f}\n"
-                metrics_text += f"RMSE = {deconv.quality_metrics.get('RMSE', 0):.2e}"
-                ax_norm.text(0.02, 0.98, metrics_text, transform=ax_norm.transAxes,
-                            fontsize=10, verticalalignment='top',
-                            bbox=dict(boxstyle="round,pad=0.3", facecolor='white', alpha=0.8))
-            
-            ax_norm.legend(loc='upper right', fontsize=8, frameon=True, edgecolor='black')
-            ax_norm.grid(True, alpha=0.3, linestyle='--')
-            
-            ax_norm.spines['top'].set_visible(True)
-            ax_norm.spines['right'].set_visible(True)
-            ax_norm.spines['bottom'].set_linewidth(1)
-            ax_norm.spines['left'].set_linewidth(1)
-            ax_norm.spines['top'].set_linewidth(1)
-            ax_norm.spines['right'].set_linewidth(1)
-            ax_norm.tick_params(direction='out', length=4, width=1)
-            
-            st.pyplot(fig_norm)
-            plt.close()
-        
-        with col2:
-            st.subheader("Normalized Components Comparison")
-            
-            fig_comp_norm, ax_comp_norm = plt.subplots(figsize=(10, 6))
-            
-            colors = plt.cm.Set3(np.linspace(0, 1, len(deconv.components)))
-            for c, color in zip(deconv.components, colors):
-                y_component_norm = GaussianModel.gaussian(x_dense_log, c['amp_norm'], 
-                                                        c['cen_log'], c['sigma_log']) 
-                y_component_norm = y_component_norm * deconv.y_max / max_amp
-                
-                ax_comp_norm.plot(x_dense, y_component_norm, '-', color=color, linewidth=2,
-                                label=f'Peak {c["id"]} (center: {c["cen_linear"]:.2e})')
-            
-            for c in deconv.components:
-                ax_comp_norm.axvline(x=c['cen_linear'], color='gray', linestyle=':', alpha=0.5)
-            
-            ax_comp_norm.set_xlabel(x_label, fontsize=12, fontweight='bold')
-            ax_comp_norm.set_ylabel('Normalized Intensity', fontsize=12, fontweight='bold')
-            ax_comp_norm.set_title('Normalized Components Overlay', fontsize=14, fontweight='bold')
-            ax_comp_norm.legend(loc='upper right', fontsize=8, frameon=True, edgecolor='black')
-            ax_comp_norm.grid(True, alpha=0.3, linestyle='--')
-            
-            if deconv.use_log_x:
-                ax_comp_norm.set_xscale('log')
-            
-            st.pyplot(fig_comp_norm)
-            plt.close()
-        
-        st.subheader("Normalized Parameters")
-        norm_data = []
-        for c in deconv.components:
-            norm_data.append({
-                'Peak': c['id'],
-                'Center': f"{c['cen_linear']:.4e}",
-                'Normalized Amplitude': f"{c['amp'] / max_amp:.4f}",
-                'Original Amplitude': f"{c['amp']:.4e}",
-                'Fraction (%)': f"{c['fraction_percent']:.2f}"
-            })
-        
-        df_norm = pd.DataFrame(norm_data)
-        st.dataframe(df_norm, use_container_width=True)
-        
-        with tab3:
-        st.subheader("Results Table - Complete Dataset")
-        
-        data = []
-        for c in deconv.components:
-            data.append({
-                'Peak ID': c['id'],
-                'Center': c['cen_linear'],
-                'Center (log)': c['cen_log'],
-                'Amplitude': c['amp'],
-                'Amplitude (norm)': c['amp_norm'],
-                'Sigma (log)': c['sigma_log'],
-                'FWHM': c['fwhm'],
-                'Area': c['area'],
-                'Fraction': c['fraction'],
-                'Fraction (%)': c['fraction_percent']
-            })
-        
-        df = pd.DataFrame(data)
-        
-        display_df = df.copy()
-        for col in ['Center', 'Amplitude', 'Area']:
-            display_df[col] = display_df[col].apply(lambda x: f"{x:.4e}")
-        display_df['Center (log)'] = display_df['Center (log)'].apply(lambda x: f"{x:.4f}")
-        display_df['Amplitude (norm)'] = display_df['Amplitude (norm)'].apply(lambda x: f"{x:.4f}")
-        display_df['Sigma (log)'] = display_df['Sigma (log)'].apply(lambda x: f"{x:.4f}")
-        display_df['FWHM'] = display_df['FWHM'].apply(lambda x: f"{x:.4f}")
-        display_df['Fraction (%)'] = display_df['Fraction (%)'].apply(lambda x: f"{x:.2f}")
-        
-        st.dataframe(display_df, use_container_width=True)
-        
-        csv = df.to_csv(index=False)
-        st.download_button(
-            label="📥 Download Raw Data (CSV)",
-            data=csv,
-            file_name=f"deconvolution_peaks_raw_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-            mime="text/csv",
-            use_container_width=True
-        )
-        
-        st.markdown("---")
-        
-        if deconv.baseline_method != 'none' and deconv.baseline_params:
-            st.subheader("Baseline Parameters")
-            baseline_df = pd.DataFrame([{
-                'Method': deconv.baseline_method,
-                'Parameters': ', '.join([f"{p:.4e}" for p in deconv.baseline_params])
-            }])
-            st.dataframe(baseline_df, use_container_width=True)
-        
-        st.markdown("---")
-        
-        st.subheader("Quality Metrics")
-        metrics = deconv.quality_metrics
-        
-        col_m1, col_m2, col_m3, col_m4 = st.columns(4)
-        with col_m1:
-            st.metric("R²", f"{metrics.get('R²', 0):.6f}")
-        with col_m2:
-            st.metric("AIC", f"{metrics.get('AIC', 0):.2f}")
-        with col_m3:
-            st.metric("BIC", f"{metrics.get('BIC', 0):.2f}")
-        with col_m4:
-            st.metric("RMSE", f"{metrics.get('RMSE', 0):.2e}")
-        
-        col_m5, col_m6, col_m7, col_m8 = st.columns(4)
-        with col_m5:
-            st.metric("χ²", f"{metrics.get('χ²', 0):.2e}")
-        with col_m6:
-            st.metric("Max Error", f"{metrics.get('Max Error', 0):.2e}")
-        with col_m7:
-            st.metric("N Parameters", len(deconv.popt) if deconv.popt is not None else 0)
-        with col_m8:
-            st.metric("N Points", len(deconv.x_linear))
-        
-        with tab4:
-        st.subheader("Export Results")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            if st.button("📥 Export Peaks to CSV", use_container_width=True):
-                df_peaks = pd.DataFrame([{
-                    'Peak_ID': c['id'],
-                    'Center': c['cen_linear'],
-                    'Center_log': c['cen_log'],
-                    'Amplitude': c['amp'],
-                    'Amplitude_norm': c['amp_norm'],
-                    'Sigma_log': c['sigma_log'],
-                    'FWHM': c['fwhm'],
-                    'Area': c['area'],
-                    'Fraction': c['fraction'],
-                    'Fraction_Percent': c['fraction_percent']
-                } for c in deconv.components])
-                
-                csv_peaks = df_peaks.to_csv(index=False)
-                
-                st.download_button(
-                    label="Download Peaks CSV",
-                    data=csv_peaks,
-                    file_name=f"deconvolution_peaks_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                    mime="text/csv",
-                    use_container_width=True
-                )
-            
-            if 'Residuals' in deconv.quality_metrics:
-                if deconv.baseline_method != 'none' and deconv.baseline_params:
-                    n_peaks = len(deconv.components)
-                    peak_params = []
-                    for c in deconv.components:
-                        peak_params.extend([c['amp_norm'], c['cen_log'], c['sigma_log']])
-                    
-                    fit_y_norm = GaussianModel.multi_gaussian_with_baseline(
-                        deconv.x, n_peaks, peak_params, 
-                        deconv.baseline_params, deconv.baseline_method
-                    )
-                else:
-                    fit_y_norm = deconv.fit_y_norm
-                
-                max_amp = max([c['amp'] for c in deconv.components])
-                
-                df_fit = pd.DataFrame({
-                    'X_original': deconv.x_linear,
-                    'Y_original': deconv.y_original,
-                    'Y_fit': fit_y_norm * deconv.y_max,
-                    'Y_fit_normalized': fit_y_norm * deconv.y_max / max_amp,
-                    'Residuals': deconv.quality_metrics['Residuals'] * deconv.y_max,
-                    'Residuals_normalized': deconv.quality_metrics['Residuals'] * deconv.y_max / max_amp
-                })
-                
-                csv_fit = df_fit.to_csv(index=False)
-                
-                st.download_button(
-                    label="Download Fitting CSV",
-                    data=csv_fit,
-                    file_name=f"deconvolution_fit_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                    mime="text/csv",
-                    use_container_width=True
-                )
-        
-        with col2:
-            if st.button("📄 Export Detailed Report", use_container_width=True):
-                max_amp = max([c['amp'] for c in deconv.components])
-                
-                report = f"""GAUSSIAN DECONVOLUTION REPORT
-        {"="*80}
-        
-        Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-        Number of points: {len(deconv.x_linear)}
-        X range: [{deconv.x_linear[0]:.2e}, {deconv.x_linear[-1]:.2e}]
-        Logarithmic X scale: {deconv.use_log_x}
-        Baseline method: {deconv.baseline_method}
-        Smoothing: {'Enabled' if st.session_state.app_state.smoothing_enabled else 'Disabled'}
-        Smoothing method: {st.session_state.app_state.smoothing_method if st.session_state.app_state.smoothing_enabled else 'N/A'}
-        
-        QUALITY METRICS:
-        {"-"*40}
-        R²: {deconv.quality_metrics.get('R²', 0):.6f}
-        AIC: {deconv.quality_metrics.get('AIC', 0):.2f}
-        BIC: {deconv.quality_metrics.get('BIC', 0):.2f}
-        χ²: {deconv.quality_metrics.get('χ²', 0):.2e}
-        RMSE: {deconv.quality_metrics.get('RMSE', 0):.2e}
-        
-        """
-                if deconv.baseline_method != 'none' and deconv.baseline_params:
-                    report += f"""BASELINE PARAMETERS:
-        {"-"*40}
-        Method: {deconv.baseline_method}
-        Parameters: {', '.join([f'{p:.4e}' for p in deconv.baseline_params])}
-        
-        """
-                
-                report += f"""COMPONENTS (ORIGINAL SCALE):
-        {"-"*80}
-        ID    Center          Amplitude       FWHM        Area           Fraction(%)
-        {"-"*80}"""
-                
-                for c in deconv.components:
-                    report += f"\n{c['id']:<4} {c['cen_linear']:<15.4e} {c['amp']:<15.4e} {c['fwhm']:<12.4f} {c['area']:<15.4e} {c['fraction_percent']:<10.2f}"
-                
-                report += f"""
-        
-        COMPONENTS (NORMALIZED TO MAX PEAK = 1):
-        {"-"*80}
-        ID    Center          Norm. Amplitude    Original Amplitude    Fraction(%)
-        {"-"*80}"""
-                
-                for c in deconv.components:
-                    norm_amp = c['amp'] / max_amp
-                    report += f"\n{c['id']:<4} {c['cen_linear']:<15.4e} {norm_amp:<18.4f} {c['amp']:<20.4e} {c['fraction_percent']:<10.2f}"
-                
-                report += f"""
-        {"="*80}
-        Total area: {deconv.total_area:.6e}
-        Maximum amplitude (for normalization): {max_amp:.6e}
-        {"="*80}"""
-                
-                st.download_button(
-                    label="Download Report",
-                    data=report,
-                    file_name=f"deconvolution_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
-                    mime="text/plain",
-                    use_container_width=True
-                )
-        
-        st.markdown("---")
-        
-        st.subheader("Export Figures")
-        
-        col_fig1, col_fig2 = st.columns(2)
-        
-        with col_fig1:
-            if st.button("📊 Save Original Scale Figure", use_container_width=True):
-                fig, ax = plt.subplots(figsize=(12, 8))
                 plotter.plot_deconvolution_result(
                     deconv,
                     show_components=True,
@@ -2953,30 +2521,114 @@ if st.session_state.app_state.current_step == 1:
                     ax=ax
                 )
                 
-                buf = io.BytesIO()
-                fig.savefig(buf, format='png', dpi=300, bbox_inches='tight')
-                buf.seek(0)
-                plt.close(fig)
+                st.pyplot(fig)
+                plt.close()
+            
+            with col2:
+                st.subheader("Area Distribution Analysis")
                 
-                st.download_button(
-                    label="Download PNG",
-                    data=buf,
-                    file_name=f"deconvolution_original_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png",
-                    mime="image/png",
-                    use_container_width=True
-                )
-        
-        with col_fig2:
-            if st.button("📈 Save Normalized Scale Figure", use_container_width=True):
-                fig_norm, ax_norm = plt.subplots(figsize=(12, 8))
+                fig = plt.figure(figsize=(12, 10))
                 
+                ax1 = plt.subplot(2, 2, 1)
+                peaks = [f'Peak {c["id"]}' for c in deconv.components]
+                areas = [c['area'] for c in deconv.components]
+                fractions = [c['fraction_percent'] for c in deconv.components]
+                colors = plt.cm.Set3(np.linspace(0, 1, len(peaks)))
+                
+                bars1 = ax1.bar(peaks, areas, color=colors, edgecolor='black', alpha=0.7)
+                ax1.set_xlabel('Peak', fontweight='bold')
+                ax1.set_ylabel('Area', fontweight='bold')
+                ax1.set_title('Peak Areas', fontweight='bold')
+                ax1.tick_params(axis='x', rotation=45)
+                ax1.grid(True, alpha=0.3, axis='y')
+                
+                for bar, area in zip(bars1, areas):
+                    height = bar.get_height()
+                    ax1.text(bar.get_x() + bar.get_width()/2., height,
+                            f'{area:.2e}',
+                            ha='center', va='bottom', fontsize=8, rotation=0)
+                
+                ax2 = plt.subplot(2, 2, 2)
+                bars2 = ax2.bar(peaks, fractions, color=colors, edgecolor='black', alpha=0.7)
+                ax2.set_xlabel('Peak', fontweight='bold')
+                ax2.set_ylabel('Fraction (%)', fontweight='bold')
+                ax2.set_title('Peak Fractions', fontweight='bold')
+                ax2.tick_params(axis='x', rotation=45)
+                ax2.grid(True, alpha=0.3, axis='y')
+                
+                for bar, frac in zip(bars2, fractions):
+                    height = bar.get_height()
+                    ax2.text(bar.get_x() + bar.get_width()/2., height,
+                            f'{frac:.1f}%',
+                            ha='center', va='bottom', fontsize=8)
+                
+                ax3 = plt.subplot(2, 2, 3)
+                wedges, texts, autotexts = ax3.pie(fractions, labels=peaks, autopct='%1.1f%%',
+                       colors=colors, startangle=90,
+                       textprops={'fontweight': 'bold'})
+                ax3.set_title('Area Distribution - Pie Chart', fontweight='bold')
+                
+                ax4 = plt.subplot(2, 2, 4)
+                y_pos = np.arange(len(peaks))
+                bars4 = ax4.barh(y_pos, fractions, color=colors, edgecolor='black', alpha=0.7)
+                ax4.set_yticks(y_pos)
+                ax4.set_yticklabels(peaks)
+                ax4.set_xlabel('Fraction (%)', fontweight='bold')
+                ax4.set_title('Peak Fractions - Horizontal View', fontweight='bold')
+                ax4.grid(True, alpha=0.3, axis='x')
+                
+                for bar, frac in zip(bars4, fractions):
+                    width = bar.get_width()
+                    ax4.text(width + 0.5, bar.get_y() + bar.get_height()/2.,
+                            f'{frac:.1f}%',
+                            ha='left', va='center', fontsize=8)
+                
+                plt.tight_layout()
+                st.pyplot(fig)
+                plt.close()
+            
+            st.markdown("---")
+            st.subheader("Summary Statistics")
+            
+            col_sum1, col_sum2, col_sum3, col_sum4 = st.columns(4)
+            
+            with col_sum1:
+                total_area = sum([c['area'] for c in deconv.components])
+                st.metric("Total Area", f"{total_area:.4e}")
+            
+            with col_sum2:
+                n_peaks = len(deconv.components)
+                st.metric("Number of Peaks", f"{n_peaks}")
+            
+            with col_sum3:
+                max_fraction_peak = max(enumerate(deconv.components), key=lambda x: x[1]['fraction'])
+                st.metric("Dominant Peak", f"Peak {max_fraction_peak[1]['id']} ({max_fraction_peak[1]['fraction_percent']:.1f}%)")
+            
+            with col_sum4:
+                avg_area = total_area / n_peaks if n_peaks > 0 else 0
+                st.metric("Average Area", f"{avg_area:.4e}")
+            
+            with tab2:
+            st.subheader("Normalized View (Max Peak Intensity = 1)")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
                 max_amp = max([c['amp'] for c in deconv.components])
+                
+                fig_norm, ax_norm = plt.subplots(figsize=(10, 6))
                 
                 if deconv.use_log_x:
                     ax_norm.set_xscale('log')
                 
-                x_dense = np.linspace(np.min(deconv.x_linear), np.max(deconv.x_linear), 2000)
-                x_dense_log = x_dense if not deconv.use_log_x else np.log10(x_dense)
+                if deconv.use_log_x:
+                    x_min = np.maximum(np.min(deconv.x_linear[deconv.x_linear>0]), np.finfo(float).eps)
+                    x_max = np.max(deconv.x_linear)
+                    x_dense = np.logspace(np.log10(x_min), np.log10(x_max), 2000)
+                    x_dense_log = np.log10(x_dense)
+                else:
+                    x_dense = np.linspace(np.min(deconv.x_linear), np.max(deconv.x_linear), 2000)
+                    x_dense_log = x_dense
                 
                 colors = plt.cm.Set3(np.linspace(0, 1, len(deconv.components)))
                 for c, color in zip(deconv.components, colors):
@@ -2986,36 +2638,384 @@ if st.session_state.app_state.current_step == 1:
                     
                     ax_norm.fill_between(x_dense, 0, y_component_norm, 
                                         color=color, alpha=0.3, linewidth=0)
+                    
                     ax_norm.plot(x_dense, y_component_norm, '-', color=color, linewidth=2,
-                               label=f'Peak {c["id"]}: {c["fraction_percent"]:.1f}%')
+                               label=f'Peak {c["id"]}: {c["fraction_percent"]:.1f}%', zorder=2)
+                
+                if deconv.baseline_method != 'none' and deconv.baseline_params:
+                    n_peaks = len(deconv.components)
+                    peak_params = []
+                    for c in deconv.components:
+                        peak_params.extend([c['amp_norm'], c['cen_log'], c['sigma_log']])
+                    
+                    y_total_norm = GaussianModel.multi_gaussian_with_baseline(
+                        x_dense_log, n_peaks, peak_params, 
+                        deconv.baseline_params, deconv.baseline_method
+                    ) * deconv.y_max / max_amp
+                else:
+                    y_total_norm = GaussianModel.multi_gaussian(x_dense_log, *deconv.popt) * deconv.y_max / max_amp
+                
+                ax_norm.plot(x_dense, y_total_norm, 'r--', linewidth=2, label='Total Fit', zorder=3)
                 
                 y_original_norm = deconv.y_original / max_amp
                 ax_norm.scatter(deconv.x_linear, y_original_norm, 
-                               s=10, alpha=0.5, color='black', label='Data')
+                               s=10, alpha=0.5, color='black', label='Data', zorder=1)
                 
-                ax_norm.set_xlabel('X' + (' (log scale)' if deconv.use_log_x else ''))
-                ax_norm.set_ylabel('Normalized Intensity')
-                ax_norm.set_title('Deconvolution Result - Normalized')
-                ax_norm.legend()
-                ax_norm.grid(True, alpha=0.3)
+                x_label = 'X' + (' (log scale)' if deconv.use_log_x else '')
+                y_label = 'Normalized Intensity'
+                ax_norm.set_xlabel(x_label, fontsize=12, fontweight='bold')
+                ax_norm.set_ylabel(y_label, fontsize=12, fontweight='bold')
+                ax_norm.set_title('Deconvolution Result - Normalized to Max Peak = 1', fontsize=14, fontweight='bold')
                 
-                buf = io.BytesIO()
-                fig_norm.savefig(buf, format='png', dpi=300, bbox_inches='tight')
-                buf.seek(0)
-                plt.close(fig_norm)
+                if deconv.quality_metrics:
+                    metrics_text = f"R² = {deconv.quality_metrics.get('R²', 0):.4f}\n"
+                    metrics_text += f"RMSE = {deconv.quality_metrics.get('RMSE', 0):.2e}"
+                    ax_norm.text(0.02, 0.98, metrics_text, transform=ax_norm.transAxes,
+                                fontsize=10, verticalalignment='top',
+                                bbox=dict(boxstyle="round,pad=0.3", facecolor='white', alpha=0.8))
                 
-                st.download_button(
-                    label="Download PNG",
-                    data=buf,
-                    file_name=f"deconvolution_normalized_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png",
-                    mime="image/png",
-                    use_container_width=True
-                )
-        
-        st.markdown("---")
-        
-        col_a, col_b = st.columns(2)
-        with col_a:
-            if st.button("🔄 New Analysis", use_container_width=True):
-                st.session_state.app_state = AppState()
-                st.rerun()
+                ax_norm.legend(loc='upper right', fontsize=8, frameon=True, edgecolor='black')
+                ax_norm.grid(True, alpha=0.3, linestyle='--')
+                
+                ax_norm.spines['top'].set_visible(True)
+                ax_norm.spines['right'].set_visible(True)
+                ax_norm.spines['bottom'].set_linewidth(1)
+                ax_norm.spines['left'].set_linewidth(1)
+                ax_norm.spines['top'].set_linewidth(1)
+                ax_norm.spines['right'].set_linewidth(1)
+                ax_norm.tick_params(direction='out', length=4, width=1)
+                
+                st.pyplot(fig_norm)
+                plt.close()
+            
+            with col2:
+                st.subheader("Normalized Components Comparison")
+                
+                fig_comp_norm, ax_comp_norm = plt.subplots(figsize=(10, 6))
+                
+                colors = plt.cm.Set3(np.linspace(0, 1, len(deconv.components)))
+                for c, color in zip(deconv.components, colors):
+                    y_component_norm = GaussianModel.gaussian(x_dense_log, c['amp_norm'], 
+                                                            c['cen_log'], c['sigma_log']) 
+                    y_component_norm = y_component_norm * deconv.y_max / max_amp
+                    
+                    ax_comp_norm.plot(x_dense, y_component_norm, '-', color=color, linewidth=2,
+                                    label=f'Peak {c["id"]} (center: {c["cen_linear"]:.2e})')
+                
+                for c in deconv.components:
+                    ax_comp_norm.axvline(x=c['cen_linear'], color='gray', linestyle=':', alpha=0.5)
+                
+                ax_comp_norm.set_xlabel(x_label, fontsize=12, fontweight='bold')
+                ax_comp_norm.set_ylabel('Normalized Intensity', fontsize=12, fontweight='bold')
+                ax_comp_norm.set_title('Normalized Components Overlay', fontsize=14, fontweight='bold')
+                ax_comp_norm.legend(loc='upper right', fontsize=8, frameon=True, edgecolor='black')
+                ax_comp_norm.grid(True, alpha=0.3, linestyle='--')
+                
+                if deconv.use_log_x:
+                    ax_comp_norm.set_xscale('log')
+                
+                st.pyplot(fig_comp_norm)
+                plt.close()
+            
+            st.subheader("Normalized Parameters")
+            norm_data = []
+            for c in deconv.components:
+                norm_data.append({
+                    'Peak': c['id'],
+                    'Center': f"{c['cen_linear']:.4e}",
+                    'Normalized Amplitude': f"{c['amp'] / max_amp:.4f}",
+                    'Original Amplitude': f"{c['amp']:.4e}",
+                    'Fraction (%)': f"{c['fraction_percent']:.2f}"
+                })
+            
+            df_norm = pd.DataFrame(norm_data)
+            st.dataframe(df_norm, use_container_width=True)
+            
+            with tab3:
+            st.subheader("Results Table - Complete Dataset")
+            
+            data = []
+            for c in deconv.components:
+                data.append({
+                    'Peak ID': c['id'],
+                    'Center': c['cen_linear'],
+                    'Center (log)': c['cen_log'],
+                    'Amplitude': c['amp'],
+                    'Amplitude (norm)': c['amp_norm'],
+                    'Sigma (log)': c['sigma_log'],
+                    'FWHM': c['fwhm'],
+                    'Area': c['area'],
+                    'Fraction': c['fraction'],
+                    'Fraction (%)': c['fraction_percent']
+                })
+            
+            df = pd.DataFrame(data)
+            
+            display_df = df.copy()
+            for col in ['Center', 'Amplitude', 'Area']:
+                display_df[col] = display_df[col].apply(lambda x: f"{x:.4e}")
+            display_df['Center (log)'] = display_df['Center (log)'].apply(lambda x: f"{x:.4f}")
+            display_df['Amplitude (norm)'] = display_df['Amplitude (norm)'].apply(lambda x: f"{x:.4f}")
+            display_df['Sigma (log)'] = display_df['Sigma (log)'].apply(lambda x: f"{x:.4f}")
+            display_df['FWHM'] = display_df['FWHM'].apply(lambda x: f"{x:.4f}")
+            display_df['Fraction (%)'] = display_df['Fraction (%)'].apply(lambda x: f"{x:.2f}")
+            
+            st.dataframe(display_df, use_container_width=True)
+            
+            csv = df.to_csv(index=False)
+            st.download_button(
+                label="📥 Download Raw Data (CSV)",
+                data=csv,
+                file_name=f"deconvolution_peaks_raw_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+            
+            st.markdown("---")
+            
+            if deconv.baseline_method != 'none' and deconv.baseline_params:
+                st.subheader("Baseline Parameters")
+                baseline_df = pd.DataFrame([{
+                    'Method': deconv.baseline_method,
+                    'Parameters': ', '.join([f"{p:.4e}" for p in deconv.baseline_params])
+                }])
+                st.dataframe(baseline_df, use_container_width=True)
+            
+            st.markdown("---")
+            
+            st.subheader("Quality Metrics")
+            metrics = deconv.quality_metrics
+            
+            col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+            with col_m1:
+                st.metric("R²", f"{metrics.get('R²', 0):.6f}")
+            with col_m2:
+                st.metric("AIC", f"{metrics.get('AIC', 0):.2f}")
+            with col_m3:
+                st.metric("BIC", f"{metrics.get('BIC', 0):.2f}")
+            with col_m4:
+                st.metric("RMSE", f"{metrics.get('RMSE', 0):.2e}")
+            
+            col_m5, col_m6, col_m7, col_m8 = st.columns(4)
+            with col_m5:
+                st.metric("χ²", f"{metrics.get('χ²', 0):.2e}")
+            with col_m6:
+                st.metric("Max Error", f"{metrics.get('Max Error', 0):.2e}")
+            with col_m7:
+                st.metric("N Parameters", len(deconv.popt) if deconv.popt is not None else 0)
+            with col_m8:
+                st.metric("N Points", len(deconv.x_linear))
+            
+            with tab4:
+            st.subheader("Export Results")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                if st.button("📥 Export Peaks to CSV", use_container_width=True):
+                    df_peaks = pd.DataFrame([{
+                        'Peak_ID': c['id'],
+                        'Center': c['cen_linear'],
+                        'Center_log': c['cen_log'],
+                        'Amplitude': c['amp'],
+                        'Amplitude_norm': c['amp_norm'],
+                        'Sigma_log': c['sigma_log'],
+                        'FWHM': c['fwhm'],
+                        'Area': c['area'],
+                        'Fraction': c['fraction'],
+                        'Fraction_Percent': c['fraction_percent']
+                    } for c in deconv.components])
+                    
+                    csv_peaks = df_peaks.to_csv(index=False)
+                    
+                    st.download_button(
+                        label="Download Peaks CSV",
+                        data=csv_peaks,
+                        file_name=f"deconvolution_peaks_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                        mime="text/csv",
+                        use_container_width=True
+                    )
+                
+                if 'Residuals' in deconv.quality_metrics:
+                    if deconv.baseline_method != 'none' and deconv.baseline_params:
+                        n_peaks = len(deconv.components)
+                        peak_params = []
+                        for c in deconv.components:
+                            peak_params.extend([c['amp_norm'], c['cen_log'], c['sigma_log']])
+                        
+                        fit_y_norm = GaussianModel.multi_gaussian_with_baseline(
+                            deconv.x, n_peaks, peak_params, 
+                            deconv.baseline_params, deconv.baseline_method
+                        )
+                    else:
+                        fit_y_norm = deconv.fit_y_norm
+                    
+                    max_amp = max([c['amp'] for c in deconv.components])
+                    
+                    df_fit = pd.DataFrame({
+                        'X_original': deconv.x_linear,
+                        'Y_original': deconv.y_original,
+                        'Y_fit': fit_y_norm * deconv.y_max,
+                        'Y_fit_normalized': fit_y_norm * deconv.y_max / max_amp,
+                        'Residuals': deconv.quality_metrics['Residuals'] * deconv.y_max,
+                        'Residuals_normalized': deconv.quality_metrics['Residuals'] * deconv.y_max / max_amp
+                    })
+                    
+                    csv_fit = df_fit.to_csv(index=False)
+                    
+                    st.download_button(
+                        label="Download Fitting CSV",
+                        data=csv_fit,
+                        file_name=f"deconvolution_fit_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                        mime="text/csv",
+                        use_container_width=True
+                    )
+            
+            with col2:
+                if st.button("📄 Export Detailed Report", use_container_width=True):
+                    max_amp = max([c['amp'] for c in deconv.components])
+                    
+                    report = f"""GAUSSIAN DECONVOLUTION REPORT
+            {"="*80}
+            
+            Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+            Number of points: {len(deconv.x_linear)}
+            X range: [{deconv.x_linear[0]:.2e}, {deconv.x_linear[-1]:.2e}]
+            Logarithmic X scale: {deconv.use_log_x}
+            Baseline method: {deconv.baseline_method}
+            Smoothing: {'Enabled' if st.session_state.app_state.smoothing_enabled else 'Disabled'}
+            Smoothing method: {st.session_state.app_state.smoothing_method if st.session_state.app_state.smoothing_enabled else 'N/A'}
+            
+            QUALITY METRICS:
+            {"-"*40}
+            R²: {deconv.quality_metrics.get('R²', 0):.6f}
+            AIC: {deconv.quality_metrics.get('AIC', 0):.2f}
+            BIC: {deconv.quality_metrics.get('BIC', 0):.2f}
+            χ²: {deconv.quality_metrics.get('χ²', 0):.2e}
+            RMSE: {deconv.quality_metrics.get('RMSE', 0):.2e}
+            
+            """
+                    if deconv.baseline_method != 'none' and deconv.baseline_params:
+                        report += f"""BASELINE PARAMETERS:
+            {"-"*40}
+            Method: {deconv.baseline_method}
+            Parameters: {', '.join([f'{p:.4e}' for p in deconv.baseline_params])}
+            
+            """
+                    
+                    report += f"""COMPONENTS (ORIGINAL SCALE):
+            {"-"*80}
+            ID    Center          Amplitude       FWHM        Area           Fraction(%)
+            {"-"*80}"""
+                    
+                    for c in deconv.components:
+                        report += f"\n{c['id']:<4} {c['cen_linear']:<15.4e} {c['amp']:<15.4e} {c['fwhm']:<12.4f} {c['area']:<15.4e} {c['fraction_percent']:<10.2f}"
+                    
+                    report += f"""
+            
+            COMPONENTS (NORMALIZED TO MAX PEAK = 1):
+            {"-"*80}
+            ID    Center          Norm. Amplitude    Original Amplitude    Fraction(%)
+            {"-"*80}"""
+                    
+                    for c in deconv.components:
+                        norm_amp = c['amp'] / max_amp
+                        report += f"\n{c['id']:<4} {c['cen_linear']:<15.4e} {norm_amp:<18.4f} {c['amp']:<20.4e} {c['fraction_percent']:<10.2f}"
+                    
+                    report += f"""
+            {"="*80}
+            Total area: {deconv.total_area:.6e}
+            Maximum amplitude (for normalization): {max_amp:.6e}
+            {"="*80}"""
+                    
+                    st.download_button(
+                        label="Download Report",
+                        data=report,
+                        file_name=f"deconvolution_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+                        mime="text/plain",
+                        use_container_width=True
+                    )
+            
+            st.markdown("---")
+            
+            st.subheader("Export Figures")
+            
+            col_fig1, col_fig2 = st.columns(2)
+            
+            with col_fig1:
+                if st.button("📊 Save Original Scale Figure", use_container_width=True):
+                    fig, ax = plt.subplots(figsize=(12, 8))
+                    plotter.plot_deconvolution_result(
+                        deconv,
+                        show_components=True,
+                        show_baseline=True,
+                        title="Deconvolution Result - Original Scale",
+                        ax=ax
+                    )
+                    
+                    buf = io.BytesIO()
+                    fig.savefig(buf, format='png', dpi=300, bbox_inches='tight')
+                    buf.seek(0)
+                    plt.close(fig)
+                    
+                    st.download_button(
+                        label="Download PNG",
+                        data=buf,
+                        file_name=f"deconvolution_original_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png",
+                        mime="image/png",
+                        use_container_width=True
+                    )
+            
+            with col_fig2:
+                if st.button("📈 Save Normalized Scale Figure", use_container_width=True):
+                    fig_norm, ax_norm = plt.subplots(figsize=(12, 8))
+                    
+                    max_amp = max([c['amp'] for c in deconv.components])
+                    
+                    if deconv.use_log_x:
+                        ax_norm.set_xscale('log')
+                    
+                    x_dense = np.linspace(np.min(deconv.x_linear), np.max(deconv.x_linear), 2000)
+                    x_dense_log = x_dense if not deconv.use_log_x else np.log10(x_dense)
+                    
+                    colors = plt.cm.Set3(np.linspace(0, 1, len(deconv.components)))
+                    for c, color in zip(deconv.components, colors):
+                        y_component_norm = GaussianModel.gaussian(x_dense_log, c['amp_norm'], 
+                                                                c['cen_log'], c['sigma_log']) 
+                        y_component_norm = y_component_norm * deconv.y_max / max_amp
+                        
+                        ax_norm.fill_between(x_dense, 0, y_component_norm, 
+                                            color=color, alpha=0.3, linewidth=0)
+                        ax_norm.plot(x_dense, y_component_norm, '-', color=color, linewidth=2,
+                                   label=f'Peak {c["id"]}: {c["fraction_percent"]:.1f}%')
+                    
+                    y_original_norm = deconv.y_original / max_amp
+                    ax_norm.scatter(deconv.x_linear, y_original_norm, 
+                                   s=10, alpha=0.5, color='black', label='Data')
+                    
+                    ax_norm.set_xlabel('X' + (' (log scale)' if deconv.use_log_x else ''))
+                    ax_norm.set_ylabel('Normalized Intensity')
+                    ax_norm.set_title('Deconvolution Result - Normalized')
+                    ax_norm.legend()
+                    ax_norm.grid(True, alpha=0.3)
+                    
+                    buf = io.BytesIO()
+                    fig_norm.savefig(buf, format='png', dpi=300, bbox_inches='tight')
+                    buf.seek(0)
+                    plt.close(fig_norm)
+                    
+                    st.download_button(
+                        label="Download PNG",
+                        data=buf,
+                        file_name=f"deconvolution_normalized_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png",
+                        mime="image/png",
+                        use_container_width=True
+                    )
+            
+            st.markdown("---")
+            
+            col_a, col_b = st.columns(2)
+            with col_a:
+                if st.button("🔄 New Analysis", use_container_width=True):
+                    st.session_state.app_state = AppState()
+                    st.rerun()
