@@ -1829,8 +1829,7 @@ if st.session_state.app_state.current_step == 1:
             height=300,
             value=DEFAULT_DATA
         )
-    
-    with col2:
+
     with col2:
         st.subheader("Data Format:")
         st.info(
