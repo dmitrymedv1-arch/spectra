@@ -1068,11 +1068,15 @@ class GaussianDeconvolver:
     def __init__(self, x_linear, y_original, use_log_x=True, use_log_y=False,
                  clip_negative=True, show_warnings=True, baseline_method='none',
                  smoothing_method='savgol', smoothing_window=11, smoothing_polyorder=3):
-        self.x_original = np.array(x_linear).copy()
-        self.y_original_raw = np.array(y_original).copy()
+        self.x_original = np.asarray(x_linear).flatten().copy()
+        self.y_original_raw = np.asarray(y_original).flatten().copy()
         
-        self.x_linear = np.array(x_linear)
-        self.y_original = np.array(y_original)
+        self.x_linear = np.asarray(x_linear).flatten()
+        self.y_original = np.asarray(y_original).flatten()
+        
+        # Проверяем, что данные не пустые
+        if len(self.x_linear) == 0 or len(self.y_original) == 0:
+            raise ValueError("Empty data arrays provided to GaussianDeconvolver")
         self.use_log_x = use_log_x
         self.use_log_y = use_log_y
         self.baseline_method = baseline_method
