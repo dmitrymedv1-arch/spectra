@@ -58,7 +58,42 @@ class AppState:
 
 # Initialize session state with dataclass
 if 'app_state' not in st.session_state:
-    st.session_state.app_state = AppState()
+    st.session_state.app_state = AppState(
+        deconvolver=None,
+        raw_x=None,
+        raw_y=None,
+        original_x=None,
+        original_y=None,
+        peak_info=None,
+        derivatives=None,
+        current_step=1,
+        use_log_x=True,
+        use_log_y=False,
+        sensitivity=0.03,
+        min_distance=5,
+        split_position=None,
+        x_range_min=None,
+        x_range_max=None,
+        clip_negative=True,
+        fitting_method='trf',
+        max_nfev=5000,
+        show_warnings=True,
+        baseline_method='none',
+        baseline_degree=1,
+        fit_quality='balanced',
+        last_popt=None,
+        pending_split=None,
+        pending_remove=None,
+        preview_mode=False,
+        smoothing_enabled=False,
+        smoothing_window=11,
+        smoothing_polyorder=3,
+        manual_peak_position=None,
+        manual_peak_added=[],
+        residual_peaks=[],
+        pending_manual_peaks=[],
+        pending_residual_peaks=[]
+    )
 
 # ==================== PAGE CONFIGURATION ====================
 
