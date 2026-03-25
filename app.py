@@ -217,7 +217,7 @@ class DataPreprocessor:
         """Preprocess data for fitting with proper handling of edge cases"""
         sort_idx = np.argsort(x_linear)
         x_sorted = x_linear[sort_idx]
-        y_sorted = y_original[sort_idx]
+        y_sorted = np.array(y_original)[sort_idx]
         
         if self.clip_negative:
             negative_mask = y_sorted < 0
