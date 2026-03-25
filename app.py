@@ -1984,7 +1984,7 @@ elif st.session_state.app_state.current_step == 2:
         plt.close()
 
 
-# ==================== STEP 3: PEAK DETECTION ====================
+# ==================== STEP 3: PEAK DETECTION (обновленная секция с ручным добавлением пиков) ====================
 
 elif st.session_state.app_state.current_step == 3:
     st.header("Step 3: Peak Detection")
@@ -2063,18 +2063,44 @@ elif st.session_state.app_state.current_step == 3:
         if st.session_state.app_state.peak_info is not None:
             deconv = st.session_state.app_state.deconvolver
             
-            x_min = np.min(deconv.x_linear)
-            x_max = np.max(deconv.x_linear)
-            
-            n_steps = 500
-            positions = np.linspace(x_min, x_max, n_steps)
-            
-            manual_position = st.select_slider(
-                "Select X position for new peak:",
-                options=positions,
-                format_func=lambda x: f"{x:.4e}",
-                key="manual_peak_slider"
-            )
+            if deconv.use_log_x:
+                x_min_display = np.min(deconv.x_linear[deconv.x_linear > 0]) if np.any(deconv.x_linear > 0) else np.min(deconv.x_linear)
+                x_max_display = np.max(deconv.x_linear)
+                x_min_log = np.log10(x_min_display)
+                x_max_log = np.log10(x_max_display)
+                
+                n_points = len(deconv.x_linear)
+                if n_points <= 200:
+                    n_steps = n_points
+                else:
+                    n_steps = 200
+                
+                log_positions = np.linspace(x_min_log, x_max_log, n_steps)
+                linear_positions = 10 ** log_positions
+                
+                manual_position_log = st.select_slider(
+                    "Select peak position:",
+                    options=log_positions,
+                    format_func=lambda x: f"{10**x:.4e}",
+                    key="manual_peak_slider_log"
+                )
+                manual_position = 10 ** manual_position_log
+            else:
+                x_min_display = np.min(deconv.x_linear)
+                x_max_display = np.max(deconv.x_linear)
+                
+                n_points = len(deconv.x_linear)
+                if n_points <= 200:
+                    n_steps = n_points
+                else:
+                    n_steps = 200
+                
+                manual_position = st.select_slider(
+                    "Select peak position:",
+                    options=np.linspace(x_min_display, x_max_display, n_steps),
+                    format_func=lambda x: f"{x:.4e}",
+                    key="manual_peak_slider_linear"
+                )
             
             if st.button("➕ Add Peak at Selected Position", use_container_width=True):
                 new_peak = deconv.add_manual_peak(manual_position)
@@ -2184,9 +2210,16 @@ elif st.session_state.app_state.current_step == 3:
             tab1, tab2, tab3, tab4 = st.tabs(["📊 Peaks", "📈 Derivatives", "🔍 Residuals", "📋 Information"])
             
             with tab1:
-                highlight_pos = None
-                if 'manual_peak_slider' in st.session_state:
-                    highlight_pos = st.session_state.manual_peak_slider
+                if deconv.use_log_x:
+                    if hasattr(st.session_state, 'manual_peak_slider_log'):
+                        highlight_pos = 10 ** st.session_state.manual_peak_slider_log
+                    else:
+                        highlight_pos = None
+                else:
+                    if hasattr(st.session_state, 'manual_peak_slider_linear'):
+                        highlight_pos = st.session_state.manual_peak_slider_linear
+                    else:
+                        highlight_pos = None
                 
                 fig, ax = plt.subplots(figsize=(10, 6))
                 plotter.plot_with_peaks(
