@@ -4,6 +4,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from scipy.signal import savgol_filter, find_peaks, peak_widths
 from scipy.optimize import curve_fit, least_squares
+from scipy.ndimage import gaussian_filter1d
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import re
@@ -16,7 +17,6 @@ import time
 
 # ==================== STATE MANAGEMENT ====================
 
-@dataclass
 @dataclass
 class AppState:
     """Centralized state management for the application"""
@@ -45,7 +45,15 @@ class AppState:
     last_popt: Optional[np.ndarray] = None  # Кэш последних параметров
     pending_split: Optional[Tuple[int, float]] = None  # Ожидающие операции
     pending_remove: Optional[int] = None
-    preview_mode: bool = False 
+    preview_mode: bool = False
+    # Новые атрибуты для сглаживания и ручного добавления пиков
+    smoothing_level: str = 'none'  # 'none', 'light', 'medium', 'strong', 'adaptive'
+    manual_peaks: List[Dict] = field(default_factory=list)  # Вручную добавленные пики
+    residuals_peaks: List[Dict] = field(default_factory=list)  # Пики, найденные по остаткам
+    peak_sources: Dict[int, str] = field(default_factory=dict)  # Источник каждого пика (auto/manual/residuals)
+    manual_peak_position: Optional[float] = None  # Текущая позиция для ручного добавления
+    show_smoothing_preview: bool = False  # Показывать превью сглаживания
+    auto_smooth_suggested: bool = False  # Предложение включить сглаживание
 
 # Initialize session state with dataclass
 if 'app_state' not in st.session_state:
@@ -170,12 +178,19 @@ class DataParser:
         return suggest_log_x, suggest_log_y
 
     @staticmethod
-    def apply_range_selection(x, y, x_min, x_max):
-        """Apply range selection to data"""
+    def apply_range_selection(x, y, x_min, x_max, use_log_x=False):
+        """Apply range selection to data with proper handling of log scales"""
         if x_min is None or x_max is None:
             return x, y
         
-        mask = (x >= x_min) & (x <= x_max)
+        # If using log scale, convert selection to linear space for masking
+        if use_log_x:
+            x_min_linear = 10 ** x_min if x_min > -np.inf else np.min(x[x > 0])
+            x_max_linear = 10 ** x_max if x_max < np.inf else np.max(x)
+            mask = (x >= x_min_linear) & (x <= x_max_linear)
+        else:
+            mask = (x >= x_min) & (x <= x_max)
+        
         return x[mask], y[mask]
 
 
@@ -188,7 +203,48 @@ class DataPreprocessor:
         self.clipped_points = 0
         self.small_values_warning = False
     
-    def preprocess_for_fitting(self, x_linear, y_original, use_log_x, use_log_y):
+    def smooth_data(self, x, y, method='savgol', level='none', x_log=False):
+        """Smooth data with various methods and levels"""
+        if level == 'none' or len(y) < 5:
+            return y
+        
+        # Determine window size based on level and data length
+        n_points = len(y)
+        if level == 'light':
+            window = min(5, n_points - 1 if n_points % 2 == 0 else n_points)
+        elif level == 'medium':
+            window = min(11, n_points - 1 if n_points % 2 == 0 else n_points)
+        elif level == 'strong':
+            window = min(21, n_points - 1 if n_points % 2 == 0 else n_points)
+        elif level == 'adaptive':
+            # Adaptive smoothing: larger window for noisier regions
+            noise_estimate = np.std(np.diff(y)) / np.mean(np.abs(y)) if np.mean(np.abs(y)) > 0 else 1
+            if noise_estimate > 0.5:
+                window = min(21, n_points - 1 if n_points % 2 == 0 else n_points)
+            elif noise_estimate > 0.2:
+                window = min(11, n_points - 1 if n_points % 2 == 0 else n_points)
+            else:
+                window = min(5, n_points - 1 if n_points % 2 == 0 else n_points)
+        else:
+            return y
+        
+        # Ensure window is odd
+        if window % 2 == 0:
+            window += 1
+        
+        try:
+            if method == 'savgol':
+                polyorder = min(3, window - 1)
+                return savgol_filter(y, window, polyorder)
+            elif method == 'gaussian':
+                sigma = window / 5
+                return gaussian_filter1d(y, sigma)
+        except Exception as e:
+            if self.show_warnings:
+                warnings.warn(f"Smoothing failed: {e}")
+            return y
+    
+    def preprocess_for_fitting(self, x_linear, y_original, use_log_x, use_log_y, smoothing_level='none'):
         """Preprocess data for fitting with proper handling of edge cases"""
         # Sort by X to ensure monotonic increasing X
         sort_idx = np.argsort(x_linear)
@@ -204,6 +260,10 @@ class DataPreprocessor:
             y_for_fitting = np.maximum(y_sorted, 0)
         else:
             y_for_fitting = y_sorted
+        
+        # Apply smoothing if requested
+        if smoothing_level != 'none':
+            y_for_fitting = self.smooth_data(x_sorted, y_for_fitting, 'savgol', smoothing_level, use_log_x)
         
         # Small epsilon for log transformations
         eps = np.finfo(float).eps  # Use machine epsilon instead of 1e-12
@@ -692,8 +752,9 @@ class SpectrumPlotter:
         return fig, ax
     
     def plot_with_peaks(self, deconvolver, peak_info, y_smooth, 
-                        title="Peak Detection", ax=None, figsize=(10, 6)):
-        """Plot data with detected peaks"""
+                        title="Peak Detection", ax=None, figsize=(10, 6),
+                        manual_peak_position=None, manual_peak_source=None):
+        """Plot data with detected peaks and optional manual peak position indicator"""
         if ax is None:
             fig, ax = plt.subplots(figsize=figsize)
         else:
@@ -719,17 +780,61 @@ class SpectrumPlotter:
         ax.plot(deconvolver.x_sorted, y_smooth_original, 
                 'r-', linewidth=2, label='Smoothed', color='red', zorder=2)
         
-        # Mark detected peaks
+        # Color mapping for peak sources
+        source_colors = {
+            'auto': 'green',
+            'manual': 'orange',
+            'residuals': 'blue'
+        }
+        
+        # Mark detected peaks with source-based colors
         for i, info in enumerate(peak_info):
+            source = info.get('source', 'auto')
+            color = source_colors.get(source, 'green')
+            marker_color = 'darkred' if source == 'auto' else 'darkorange' if source == 'manual' else 'darkblue'
+            facecolor = 'lime' if source == 'auto' else 'orange' if source == 'manual' else 'lightblue'
+            
             peak_y_original = info['y_original']
             ax.plot(info['x_linear'], peak_y_original, 
-                    'ro', markersize=8, markeredgecolor='darkred', 
-                    markerfacecolor='yellow', zorder=3)
+                    'o', markersize=8, markeredgecolor=marker_color, 
+                    markerfacecolor=facecolor, zorder=3)
             ax.text(info['x_linear'], peak_y_original * 1.05, 
                     f'{i+1}', ha='center', fontweight='bold', 
                     fontsize=12, bbox=dict(boxstyle="round,pad=0.3", 
                                           facecolor='white', alpha=0.8),
                     zorder=4)
+        
+        # Show manual peak position indicator if provided
+        if manual_peak_position is not None:
+            # Find Y value at this position
+            idx = np.argmin(np.abs(deconvolver.x_sorted - manual_peak_position))
+            y_at_position = deconvolver.y_sorted[idx]
+            
+            # Draw vertical line
+            ax.axvline(x=manual_peak_position, color='red', linestyle='--', 
+                      linewidth=1.5, alpha=0.7, label='Selected position')
+            
+            # Draw red dot at the position
+            ax.plot(manual_peak_position, y_at_position, 'ro', 
+                   markersize=10, markeredgecolor='darkred', 
+                   markerfacecolor='red', zorder=5)
+            
+            # Add annotation
+            ax.annotate(f'X: {manual_peak_position:.3e}\nY: {y_at_position:.3e}',
+                       xy=(manual_peak_position, y_at_position),
+                       xytext=(10, 10), textcoords='offset points',
+                       fontsize=10, bbox=dict(boxstyle="round,pad=0.3", 
+                                             facecolor='yellow', alpha=0.8))
+        
+        # Add legend for peak sources if available
+        if any(info.get('source', 'auto') != 'auto' for info in peak_info):
+            from matplotlib.patches import Patch
+            legend_elements = [
+                Patch(facecolor='lime', edgecolor='darkgreen', label='Auto-detected peaks'),
+                Patch(facecolor='orange', edgecolor='darkorange', label='Manually added peaks'),
+                Patch(facecolor='lightblue', edgecolor='darkblue', label='Residuals-found peaks')
+            ]
+            ax.legend(handles=legend_elements, loc='upper right', fontsize=9)
         
         # Labels and title
         x_label = 'X' + (' (log scale)' if deconvolver.use_log_x else '')
@@ -914,7 +1019,8 @@ class GaussianDeconvolver:
     """Main class for spectral deconvolution with baseline correction"""
     
     def __init__(self, x_linear, y_original, use_log_x=True, use_log_y=False,
-                 clip_negative=True, show_warnings=True, baseline_method='none'):
+                 clip_negative=True, show_warnings=True, baseline_method='none',
+                 smoothing_level='none'):
         # Store original data WITHOUT ANY MODIFICATIONS for display purposes
         self.x_original = np.array(x_linear).copy()
         self.y_original_raw = np.array(y_original).copy()
@@ -925,6 +1031,7 @@ class GaussianDeconvolver:
         self.use_log_x = use_log_x
         self.use_log_y = use_log_y
         self.baseline_method = baseline_method
+        self.smoothing_level = smoothing_level
         
         # Sort by X to ensure monotonic increasing X
         sort_idx = np.argsort(self.x_linear)
@@ -938,7 +1045,7 @@ class GaussianDeconvolver:
         # Preprocess data
         self.preprocessor = DataPreprocessor(clip_negative, show_warnings)
         preprocessed = self.preprocessor.preprocess_for_fitting(
-            self.x_linear, self.y_original, use_log_x, use_log_y
+            self.x_linear, self.y_original, use_log_x, use_log_y, smoothing_level
         )
         
         # Update with preprocessed data
@@ -1038,12 +1145,166 @@ class GaussianDeconvolver:
                 'cen_est': cen,
                 'sigma_est': sigma,
                 'dy': dy[peak_idx],
-                'd2y': d2y[peak_idx]
+                'd2y': d2y[peak_idx],
+                'source': 'auto'  # Mark source as auto-detected
             })
             
             initial_params.extend([amp, cen, sigma])
         
         return filtered_peaks, peak_info, initial_params, (dy, d2y, y_smooth)
+    
+    def add_manual_peak(self, x_position_linear, amplitude=None, sigma_est=None):
+        """Add a peak manually at specified linear X position"""
+        # Convert to log space if needed
+        if self.use_log_x:
+            x_position = np.log10(x_position_linear)
+        else:
+            x_position = x_position_linear
+        
+        # Find index for amplitude estimation
+        idx = np.argmin(np.abs(self.x_sorted - x_position_linear))
+        
+        # Estimate amplitude if not provided
+        if amplitude is None:
+            # Get normalized amplitude at this position
+            if self.use_log_x:
+                # Find closest index in log space
+                log_idx = np.argmin(np.abs(self.x - x_position))
+                amplitude = self.y_norm[log_idx] if log_idx < len(self.y_norm) else 0.1
+            else:
+                amplitude = self.y_norm[idx] if idx < len(self.y_norm) else 0.1
+        
+        # Estimate sigma if not provided
+        if sigma_est is None:
+            # Estimate based on distance to nearest minimum
+            if self.use_log_x:
+                x_search = self.x
+                y_search = self.y_norm
+            else:
+                x_search = self.x_linear
+                y_search = self.y_original / self.y_max
+            
+            # Find nearest minima to left and right
+            left_idx = idx
+            right_idx = idx
+            for i in range(idx - 1, 0, -1):
+                if i < len(y_search) - 1 and y_search[i] < y_search[i-1] and y_search[i] < y_search[i+1]:
+                    left_idx = i
+                    break
+            for i in range(idx + 1, len(y_search) - 1):
+                if y_search[i] < y_search[i-1] and y_search[i] < y_search[i+1]:
+                    right_idx = i
+                    break
+            
+            # Estimate sigma
+            width = (x_search[right_idx] - x_search[left_idx]) if right_idx > left_idx else 0.1
+            sigma_est = max(width / 3.0, 0.01 * (np.max(x_search) - np.min(x_search)) / 20)
+        
+        # Add peak info
+        peak_info_entry = {
+            'index': idx,
+            'x': x_position,
+            'x_linear': x_position_linear,
+            'y': amplitude,
+            'y_original': self.y_sorted[idx],
+            'amp_est': amplitude,
+            'cen_est': x_position,
+            'sigma_est': sigma_est,
+            'dy': 0,
+            'd2y': 0,
+            'source': 'manual'
+        }
+        
+        return peak_info_entry, [amplitude, x_position, sigma_est]
+    
+    def find_missing_peaks_by_residuals(self, peak_info, sensitivity=0.02, min_distance=5):
+        """Find missing peaks by analyzing residuals after initial fit"""
+        if not peak_info:
+            return [], []
+        
+        # Build initial model with current peaks
+        n_peaks = len(peak_info)
+        if n_peaks == 0:
+            return [], []
+        
+        peak_params = []
+        for info in peak_info:
+            peak_params.extend([info['amp_est'], info['cen_est'], info['sigma_est']])
+        
+        # Calculate initial fit
+        y_initial_fit = GaussianModel.multi_gaussian(self.x, *peak_params)
+        
+        # Calculate residuals
+        residuals = self.y_norm - y_initial_fit
+        
+        # Detect peaks in residuals
+        height_threshold = sensitivity * np.max(np.abs(residuals))
+        
+        # Smooth residuals for better peak detection
+        window_length = min(11, len(residuals) // 5 * 2 + 1)
+        if window_length % 2 == 0:
+            window_length += 1
+        
+        if window_length >= 5:
+            residuals_smooth = savgol_filter(residuals, window_length, 3)
+        else:
+            residuals_smooth = residuals
+        
+        # Find positive peaks (where data exceeds fit)
+        positive_peaks, _ = find_peaks(residuals_smooth, height=height_threshold, distance=min_distance)
+        
+        # Find negative peaks (where fit exceeds data - potential shoulders)
+        negative_peaks, _ = find_peaks(-residuals_smooth, height=height_threshold, distance=min_distance)
+        
+        # Combine and filter
+        all_candidate_indices = sorted(set(positive_peaks) | set(negative_peaks))
+        
+        missing_peaks = []
+        missing_params = []
+        
+        for idx in all_candidate_indices:
+            # Skip if too close to existing peaks
+            too_close = False
+            for info in peak_info:
+                if abs(self.x[idx] - info['cen_est']) < min_distance * np.mean(np.diff(self.x)):
+                    too_close = True
+                    break
+            
+            if too_close:
+                continue
+            
+            cen = self.x[idx]
+            amp = abs(residuals_smooth[idx])  # Use absolute value for amplitude
+            sigma = GaussianModel.estimate_sigma_from_peak(self.x, residuals_smooth, idx)
+            sigma = max(sigma, 0.01 * (np.max(self.x) - np.min(self.x)) / 20)
+            
+            # Get original Y value for display
+            if self.use_log_x:
+                x_linear = 10**cen
+            else:
+                x_linear = cen
+            
+            # Find closest index in original data
+            orig_idx = np.argmin(np.abs(self.x_sorted - x_linear))
+            y_original_value = self.y_sorted[orig_idx]
+            
+            missing_peaks.append({
+                'index': idx,
+                'x': cen,
+                'x_linear': x_linear,
+                'y': amp,
+                'y_original': y_original_value,
+                'amp_est': amp,
+                'cen_est': cen,
+                'sigma_est': sigma,
+                'dy': 0,
+                'd2y': 0,
+                'source': 'residuals'
+            })
+            
+            missing_params.extend([amp, cen, sigma])
+        
+        return missing_peaks, missing_params
     
     def fit(self, initial_params=None, method='trf', maxfev=5000, 
             fit_quality='balanced', last_popt=None, progress_callback=None):
@@ -1569,6 +1830,13 @@ with st.sidebar:
             value=st.session_state.app_state.show_warnings
         )
         
+        st.session_state.app_state.smoothing_level = st.selectbox(
+            "Data smoothing",
+            options=['none', 'light', 'medium', 'strong', 'adaptive'],
+            index=0,
+            help="Smooth noisy data before peak detection. Adaptive automatically adjusts based on noise level."
+        )
+        
         st.session_state.app_state.fitting_method = st.selectbox(
             "Fitting method",
             options=['trf', 'dogbox', 'lm'],
@@ -1634,13 +1902,6 @@ if st.session_state.app_state.current_step == 1:
             - Space
             - Comma
             - Tab
-            
-            Examples:
-            ```
-            1.23, 4.56
-            1.23 4.56
-            1.23\t4.56
-            ```
             """
         )
         
@@ -1713,33 +1974,73 @@ elif st.session_state.app_state.current_step == 2:
         st.markdown("---")
         st.subheader("Range Selection")
         
-        # Get current range
-        x_min = float(np.min(st.session_state.app_state.raw_x))
-        x_max = float(np.max(st.session_state.app_state.raw_x))
+        # Get current range in appropriate space
+        x_min_linear = float(np.min(st.session_state.app_state.raw_x))
+        x_max_linear = float(np.max(st.session_state.app_state.raw_x))
         
         # Initialize range if not set
         if st.session_state.app_state.x_range_min is None:
-            st.session_state.app_state.x_range_min = x_min
+            if st.session_state.app_state.use_log_x:
+                st.session_state.app_state.x_range_min = np.log10(max(x_min_linear, 1e-12))
+            else:
+                st.session_state.app_state.x_range_min = x_min_linear
         if st.session_state.app_state.x_range_max is None:
-            st.session_state.app_state.x_range_max = x_max
+            if st.session_state.app_state.use_log_x:
+                st.session_state.app_state.x_range_max = np.log10(x_max_linear)
+            else:
+                st.session_state.app_state.x_range_max = x_max_linear
         
-        # Range slider
-        range_values = st.slider(
-            "Select X-axis range:",
-            min_value=x_min,
-            max_value=x_max,
-            value=(st.session_state.app_state.x_range_min, 
-                   st.session_state.app_state.x_range_max),
-            format="%.2e",
-            help="Drag the handles to select the region of interest"
-        )
-        
-        st.session_state.app_state.x_range_min = range_values[0]
-        st.session_state.app_state.x_range_max = range_values[1]
+        # Create slider in the appropriate scale
+        if st.session_state.app_state.use_log_x:
+            # Use log space for slider
+            log_min = np.log10(max(x_min_linear, 1e-12))
+            log_max = np.log10(x_max_linear)
+            current_min = st.session_state.app_state.x_range_min
+            current_max = st.session_state.app_state.x_range_max
+            
+            # Ensure values are in log space
+            if current_min is None or current_min < log_min:
+                current_min = log_min
+            if current_max is None or current_max > log_max:
+                current_max = log_max
+            
+            # Create slider in log space
+            range_values_log = st.slider(
+                "Select X-axis range (log scale):",
+                min_value=float(log_min),
+                max_value=float(log_max),
+                value=(float(current_min), float(current_max)),
+                format="%.2f",
+                help="Drag the handles to select the region of interest"
+            )
+            
+            # Convert back to linear for display and storage
+            st.session_state.app_state.x_range_min = range_values_log[0]
+            st.session_state.app_state.x_range_max = range_values_log[1]
+            range_min_linear = 10 ** range_values_log[0]
+            range_max_linear = 10 ** range_values_log[1]
+            
+            st.info(f"Selected range: {range_min_linear:.3e} - {range_max_linear:.3e}")
+        else:
+            # Use linear space for slider
+            range_values_linear = st.slider(
+                "Select X-axis range:",
+                min_value=float(x_min_linear),
+                max_value=float(x_max_linear),
+                value=(float(st.session_state.app_state.x_range_min), 
+                       float(st.session_state.app_state.x_range_max)),
+                format="%.3e",
+                help="Drag the handles to select the region of interest"
+            )
+            
+            st.session_state.app_state.x_range_min = range_values_linear[0]
+            st.session_state.app_state.x_range_max = range_values_linear[1]
+            range_min_linear = range_values_linear[0]
+            range_max_linear = range_values_linear[1]
         
         # Show selected range statistics
-        mask = ((st.session_state.app_state.raw_x >= range_values[0]) & 
-                (st.session_state.app_state.raw_x <= range_values[1]))
+        mask = ((st.session_state.app_state.raw_x >= range_min_linear) & 
+                (st.session_state.app_state.raw_x <= range_max_linear))
         points_in_range = np.sum(mask)
         st.info(f"Points in selected range: {points_in_range} / {len(st.session_state.app_state.raw_x)}")
         
@@ -1752,12 +2053,13 @@ elif st.session_state.app_state.current_step == 2:
                 st.rerun()
         with col_b:
             if st.button("✅ Apply & Continue", type="primary", use_container_width=True):
-                # Apply range selection to data
+                # Apply range selection to data using linear values
                 x_range, y_range = DataParser.apply_range_selection(
                     st.session_state.app_state.raw_x,
                     st.session_state.app_state.raw_y,
-                    st.session_state.app_state.x_range_min,
-                    st.session_state.app_state.x_range_max
+                    range_min_linear,
+                    range_max_linear,
+                    st.session_state.app_state.use_log_x
                 )
                 
                 # Update raw data with selected range
@@ -1774,11 +2076,15 @@ elif st.session_state.app_state.current_step == 2:
         fig, ax = plt.subplots(figsize=(8, 5))
         
         # Apply range selection to preview
+        range_min_linear_preview = range_min_linear if 'range_min_linear' in dir() else st.session_state.app_state.x_range_min
+        range_max_linear_preview = range_max_linear if 'range_max_linear' in dir() else st.session_state.app_state.x_range_max
+        
         x_preview, y_preview = DataParser.apply_range_selection(
             st.session_state.app_state.raw_x,
             st.session_state.app_state.raw_y,
-            st.session_state.app_state.x_range_min,
-            st.session_state.app_state.x_range_max
+            range_min_linear_preview if isinstance(range_min_linear_preview, float) else 10**st.session_state.app_state.x_range_min,
+            range_max_linear_preview if isinstance(range_max_linear_preview, float) else 10**st.session_state.app_state.x_range_max,
+            st.session_state.app_state.use_log_x
         )
         
         plotter.plot_raw_data(
@@ -1791,8 +2097,8 @@ elif st.session_state.app_state.current_step == 2:
         
         # Highlight selected range on full data plot
         if len(x_preview) < len(st.session_state.app_state.raw_x):
-            ax.axvspan(st.session_state.app_state.x_range_min,
-                      st.session_state.app_state.x_range_max,
+            ax.axvspan(range_min_linear_preview if isinstance(range_min_linear_preview, float) else 10**st.session_state.app_state.x_range_min,
+                      range_max_linear_preview if isinstance(range_max_linear_preview, float) else 10**st.session_state.app_state.x_range_max,
                       alpha=0.2, color='green', label='Selected Range')
         
         st.pyplot(fig)
@@ -1817,7 +2123,8 @@ elif st.session_state.app_state.current_step == 3:
             use_log_y=st.session_state.app_state.use_log_y,
             clip_negative=st.session_state.app_state.clip_negative,
             show_warnings=st.session_state.app_state.show_warnings,
-            baseline_method=st.session_state.app_state.baseline_method
+            baseline_method=st.session_state.app_state.baseline_method,
+            smoothing_level=st.session_state.app_state.smoothing_level
         )
         
         # Show warnings if any
@@ -1848,6 +2155,10 @@ elif st.session_state.app_state.current_step == 3:
             step=1
         )
         
+        # Show smoothing preview option if smoothing is enabled
+        if st.session_state.app_state.smoothing_level != 'none':
+            st.info(f"Smoothing: {st.session_state.app_state.smoothing_level}")
+        
         col_a, col_b = st.columns(2)
         with col_a:
             if st.button("⬅️ Back", use_container_width=True):
@@ -1863,9 +2174,107 @@ elif st.session_state.app_state.current_step == 3:
                 st.session_state.app_state.peak_info = peak_info
                 st.session_state.app_state.derivatives = derivatives
                 st.session_state.app_state.initial_params = initial_params
+                # Clear manual and residuals peaks
+                st.session_state.app_state.manual_peaks = []
+                st.session_state.app_state.residuals_peaks = []
                 st.success(f"Found {len(peak_info)} peaks!")
         
         if st.session_state.app_state.peak_info is not None:
+            st.markdown("---")
+            st.subheader("Manual Peak Addition")
+            
+            # Get current X range for slider
+            deconv = st.session_state.app_state.deconvolver
+            if deconv.use_log_x:
+                x_min_display = 10 ** np.min(deconv.x)
+                x_max_display = 10 ** np.max(deconv.x)
+                slider_min = np.log10(x_min_display)
+                slider_max = np.log10(x_max_display)
+            else:
+                x_min_display = np.min(deconv.x_linear)
+                x_max_display = np.max(deconv.x_linear)
+                slider_min = x_min_display
+                slider_max = x_max_display
+            
+            # Calculate number of steps: min(200, n_points)
+            n_points = len(deconv.x_linear)
+            n_steps = min(200, n_points)
+            
+            # Create slider in appropriate scale
+            if deconv.use_log_x:
+                current_position_log = st.slider(
+                    "Select peak position (log scale):",
+                    min_value=float(slider_min),
+                    max_value=float(slider_max),
+                    value=float((slider_min + slider_max) / 2),
+                    step=float((slider_max - slider_min) / n_steps),
+                    format="%.2f",
+                    key="manual_peak_slider_log"
+                )
+                manual_position_linear = 10 ** current_position_log
+                st.write(f"Position: {manual_position_linear:.3e}")
+            else:
+                manual_position_linear = st.slider(
+                    "Select peak position:",
+                    min_value=float(slider_min),
+                    max_value=float(slider_max),
+                    value=float((slider_min + slider_max) / 2),
+                    step=float((slider_max - slider_min) / n_steps),
+                    format="%.3e",
+                    key="manual_peak_slider_linear"
+                )
+                st.write(f"Position: {manual_position_linear:.3e}")
+            
+            # Store current manual position for visualization
+            st.session_state.app_state.manual_peak_position = manual_position_linear
+            
+            col_add1, col_add2 = st.columns(2)
+            with col_add1:
+                if st.button("➕ Add peak at this position", use_container_width=True):
+                    # Add manual peak
+                    new_peak, new_params = deconv.add_manual_peak(manual_position_linear)
+                    # Add to peak_info
+                    if st.session_state.app_state.peak_info is None:
+                        st.session_state.app_state.peak_info = []
+                    st.session_state.app_state.peak_info.append(new_peak)
+                    st.session_state.app_state.initial_params.extend(new_params)
+                    st.session_state.app_state.manual_peaks.append(new_peak)
+                    st.success(f"Manual peak added at {manual_position_linear:.3e}")
+                    st.rerun()
+            
+            with col_add2:
+                if st.button("🔍 Find missing peaks (residuals)", use_container_width=True):
+                    with st.spinner("Analyzing residuals..."):
+                        missing_peaks, missing_params = deconv.find_missing_peaks_by_residuals(
+                            st.session_state.app_state.peak_info,
+                            sensitivity=st.session_state.app_state.sensitivity * 0.5,
+                            min_distance=st.session_state.app_state.min_distance
+                        )
+                    if missing_peaks:
+                        st.session_state.app_state.residuals_peaks = missing_peaks
+                        # Display found peaks with checkboxes for selection
+                        st.subheader("Suggested peaks from residuals:")
+                        selected_to_add = []
+                        for i, p in enumerate(missing_peaks):
+                            col_cb, col_info = st.columns([1, 3])
+                            with col_cb:
+                                if st.checkbox(f"Add peak {i+1}", key=f"residual_peak_{i}"):
+                                    selected_to_add.append(p)
+                            with col_info:
+                                st.write(f"X: {p['x_linear']:.3e}, Amp: {p['amp_est']:.3e}")
+                        
+                        if st.button("Add selected peaks", use_container_width=True):
+                            for p in selected_to_add:
+                                st.session_state.app_state.peak_info.append(p)
+                                st.session_state.app_state.initial_params.extend([p['amp_est'], p['cen_est'], p['sigma_est']])
+                                st.session_state.app_state.residuals_peaks.append(p)
+                            st.success(f"Added {len(selected_to_add)} peaks from residuals")
+                            st.rerun()
+                    else:
+                        st.info("No additional peaks found in residuals")
+            
+            st.markdown("---")
+            
             if st.button("✅ Confirm Peaks", use_container_width=True):
                 with st.spinner("Preparing preview..."):
                     if st.session_state.app_state.preview_mode:
@@ -1913,16 +2322,27 @@ elif st.session_state.app_state.current_step == 3:
             tab1, tab2, tab3 = st.tabs(["📊 Peaks", "📈 Derivatives", "📋 Information"])
 
             with tab1:
+                # Get current manual position for visualization
+                manual_pos = getattr(st.session_state.app_state, 'manual_peak_position', None)
                 fig, ax = plt.subplots(figsize=(10, 6))
                 plotter.plot_with_peaks(
                     deconv, 
                     st.session_state.app_state.peak_info, 
                     y_smooth,
                     title=f"Peak Detection - {len(st.session_state.app_state.peak_info)} peaks found",
-                    ax=ax
+                    ax=ax,
+                    manual_peak_position=manual_pos
                 )
                 st.pyplot(fig)
                 plt.close()
+                
+                # Add legend explanation
+                st.caption("""
+                **Peak color legend:**
+                - 🟢 Green: Auto-detected peaks
+                - 🟠 Orange: Manually added peaks  
+                - 🔵 Blue: Peaks found by residuals analysis
+                """)
             
             with tab2:
                 fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6))
@@ -1950,11 +2370,14 @@ elif st.session_state.app_state.current_step == 3:
                 plt.close()
             
             with tab3:
-                # Create a table with peak information in original units
+                # Create a table with peak information including source
                 data = []
                 for i, info in enumerate(st.session_state.app_state.peak_info):
+                    source = info.get('source', 'auto')
+                    source_icon = "🟢" if source == 'auto' else "🟠" if source == 'manual' else "🔵"
                     data.append({
                         'Peak': i + 1,
+                        'Source': f"{source_icon} {source}",
                         'X Center': f"{info['x_linear']:.4e}",
                         'Y Amplitude': f"{info['y_original']:.4e}",
                         'Estimated Sigma': f"{info['sigma_est']:.4f}",
@@ -1966,12 +2389,25 @@ elif st.session_state.app_state.current_step == 3:
                 # Show peak detection statistics
                 st.markdown("---")
                 st.subheader("Detection Statistics")
-                col1, col2, col3 = st.columns(3)
+                col1, col2, col3, col4 = st.columns(4)
                 with col1:
                     st.metric("Total Peaks Found", len(st.session_state.app_state.peak_info))
                 with col2:
-                    st.metric("X Range", f"{np.min(deconv.x_sorted):.2e} - {np.max(deconv.x_sorted):.2e}")
+                    auto_count = sum(1 for p in st.session_state.app_state.peak_info if p.get('source', 'auto') == 'auto')
+                    st.metric("Auto-detected", auto_count)
                 with col3:
+                    manual_count = sum(1 for p in st.session_state.app_state.peak_info if p.get('source', '') == 'manual')
+                    st.metric("Manually added", manual_count)
+                with col4:
+                    residual_count = sum(1 for p in st.session_state.app_state.peak_info if p.get('source', '') == 'residuals')
+                    st.metric("From residuals", residual_count)
+                
+                st.markdown("---")
+                st.subheader("Data Info")
+                col5, col6 = st.columns(2)
+                with col5:
+                    st.metric("X Range", f"{np.min(deconv.x_sorted):.2e} - {np.max(deconv.x_sorted):.2e}")
+                with col6:
                     st.metric("Y Range", f"{np.min(deconv.y_sorted):.2e} - {np.max(deconv.y_sorted):.2e}")
 
 
@@ -2008,8 +2444,19 @@ elif st.session_state.app_state.current_step == 4:
             
             # Peak selection (only if components exist)
             if deconv.components:
-                peak_options = {f"Peak {c['id']}: center = {c['cen_linear']:.2e}, fraction = {c['fraction_percent']:.1f}%": c['id'] 
-                               for c in deconv.components}
+                # Display peak sources in selection dropdown
+                peak_options = {}
+                for c in deconv.components:
+                    # Determine source (simplified - we don't track source per component after fit)
+                    source_info = ""
+                    if hasattr(st.session_state.app_state, 'peak_info'):
+                        for p in st.session_state.app_state.peak_info:
+                            if abs(p['x_linear'] - c['cen_linear']) / max(p['x_linear'], c['cen_linear']) < 0.01:
+                                source = p.get('source', 'auto')
+                                source_icon = "🟢" if source == 'auto' else "🟠" if source == 'manual' else "🔵"
+                                source_info = f" [{source_icon}]"
+                                break
+                    peak_options[f"Peak {c['id']}{source_info}: center = {c['cen_linear']:.2e}, fraction = {c['fraction_percent']:.1f}%"] = c['id']
                 
                 selected_peak = st.selectbox(
                     "Select peak for editing:",
@@ -2573,6 +3020,7 @@ Number of points: {len(deconv.x_linear)}
 X range: [{deconv.x_linear[0]:.2e}, {deconv.x_linear[-1]:.2e}]
 Logarithmic X scale: {deconv.use_log_x}
 Baseline method: {deconv.baseline_method}
+Smoothing level: {deconv.smoothing_level}
 
 QUALITY METRICS:
 {"-"*40}
