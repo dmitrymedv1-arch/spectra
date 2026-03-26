@@ -35,6 +35,8 @@ class AppState:
     split_position: Optional[float] = None
     x_range_min: Optional[float] = None
     x_range_max: Optional[float] = None
+    point_range_start: Optional[int] = None
+    point_range_end: Optional[int] = None
     clip_negative: bool = True
     fitting_method: str = 'trf'
     max_nfev: int = 5000  # Уменьшено с 10000 для скорости
@@ -178,18 +180,22 @@ class DataParser:
         return suggest_log_x, suggest_log_y
 
     @staticmethod
-    def apply_range_selection(x, y, x_min, x_max, use_log_x=False):
-        """Apply range selection to data with proper handling of log scales"""
-        if x_min is None or x_max is None:
+    def apply_range_selection(x, y, start_idx, end_idx, use_log_x=False):
+        """Apply range selection to data using point indices"""
+        if start_idx is None or end_idx is None:
             return x, y
         
-        # If using log scale, convert selection to linear space for masking
-        if use_log_x:
-            x_min_linear = 10 ** x_min if x_min > -np.inf else np.min(x[x > 0])
-            x_max_linear = 10 ** x_max if x_max < np.inf else np.max(x)
-            mask = (x >= x_min_linear) & (x <= x_max_linear)
+        # Ensure indices are within bounds
+        start_idx = max(0, min(start_idx, len(x) - 1))
+        end_idx = max(0, min(end_idx, len(x) - 1))
+        
+        # Select by indices (continuous block of points)
+        if start_idx <= end_idx:
+            mask = np.zeros(len(x), dtype=bool)
+            mask[start_idx:end_idx+1] = True
         else:
-            mask = (x >= x_min) & (x <= x_max)
+            mask = np.zeros(len(x), dtype=bool)
+            mask[end_idx:start_idx+1] = True
         
         return x[mask], y[mask]
 
@@ -1974,75 +1980,54 @@ elif st.session_state.app_state.current_step == 2:
         st.markdown("---")
         st.subheader("Range Selection")
         
-        # Get current range in appropriate space
-        x_min_linear = float(np.min(st.session_state.app_state.raw_x))
-        x_max_linear = float(np.max(st.session_state.app_state.raw_x))
+        # Get data points count
+        n_points = len(st.session_state.app_state.raw_x)
         
-        # Initialize range if not set
-        if st.session_state.app_state.x_range_min is None:
-            if st.session_state.app_state.use_log_x:
-                st.session_state.app_state.x_range_min = np.log10(max(x_min_linear, 1e-12))
-            else:
-                st.session_state.app_state.x_range_min = x_min_linear
-        if st.session_state.app_state.x_range_max is None:
-            if st.session_state.app_state.use_log_x:
-                st.session_state.app_state.x_range_max = np.log10(x_max_linear)
-            else:
-                st.session_state.app_state.x_range_max = x_max_linear
+        # Initialize point range if not set
+        if st.session_state.app_state.point_range_start is None:
+            st.session_state.app_state.point_range_start = 0
+        if st.session_state.app_state.point_range_end is None:
+            st.session_state.app_state.point_range_end = n_points - 1
         
-        # Create slider in the appropriate scale
+        # Create slider by point indices (1-based for user-friendly display)
+        point_range = st.slider(
+            "Select point range:",
+            min_value=1,
+            max_value=n_points,
+            value=(st.session_state.app_state.point_range_start + 1, 
+                   st.session_state.app_state.point_range_end + 1),
+            step=1,
+            help="Select range by point index (1-based). This ensures continuous block of points regardless of scale."
+        )
+        
+        # Store selected indices (convert to 0-based)
+        start_idx = point_range[0] - 1
+        end_idx = point_range[1] - 1
+        st.session_state.app_state.point_range_start = start_idx
+        st.session_state.app_state.point_range_end = end_idx
+        
+        # Get X values for display
+        x_selected = st.session_state.app_state.raw_x[start_idx:end_idx+1]
+        range_min_linear = float(np.min(x_selected))
+        range_max_linear = float(np.max(x_selected))
+        
+        # Display X range information
         if st.session_state.app_state.use_log_x:
-            # Use log space for slider
-            log_min = np.log10(max(x_min_linear, 1e-12))
-            log_max = np.log10(x_max_linear)
-            current_min = st.session_state.app_state.x_range_min
-            current_max = st.session_state.app_state.x_range_max
-            
-            # Ensure values are in log space
-            if current_min is None or current_min < log_min:
-                current_min = log_min
-            if current_max is None or current_max > log_max:
-                current_max = log_max
-            
-            # Create slider in log space
-            range_values_log = st.slider(
-                "Select X-axis range (log scale):",
-                min_value=float(log_min),
-                max_value=float(log_max),
-                value=(float(current_min), float(current_max)),
-                format="%.2f",
-                help="Drag the handles to select the region of interest"
-            )
-            
-            # Convert back to linear for display and storage
-            st.session_state.app_state.x_range_min = range_values_log[0]
-            st.session_state.app_state.x_range_max = range_values_log[1]
-            range_min_linear = 10 ** range_values_log[0]
-            range_max_linear = 10 ** range_values_log[1]
-            
-            st.info(f"Selected range: {range_min_linear:.3e} - {range_max_linear:.3e}")
+            # For log scale, show both linear and log values
+            log_min = np.log10(max(range_min_linear, 1e-12))
+            log_max = np.log10(range_max_linear)
+            st.info(f"X range: {range_min_linear:.3e} - {range_max_linear:.3e} (linear)\n"
+                   f"log₁₀(X) range: {log_min:.2f} - {log_max:.2f}")
         else:
-            # Use linear space for slider
-            range_values_linear = st.slider(
-                "Select X-axis range:",
-                min_value=float(x_min_linear),
-                max_value=float(x_max_linear),
-                value=(float(st.session_state.app_state.x_range_min), 
-                       float(st.session_state.app_state.x_range_max)),
-                format="%.3e",
-                help="Drag the handles to select the region of interest"
-            )
-            
-            st.session_state.app_state.x_range_min = range_values_linear[0]
-            st.session_state.app_state.x_range_max = range_values_linear[1]
-            range_min_linear = range_values_linear[0]
-            range_max_linear = range_values_linear[1]
+            st.info(f"X range: {range_min_linear:.3e} - {range_max_linear:.3e}")
         
         # Show selected range statistics
-        mask = ((st.session_state.app_state.raw_x >= range_min_linear) & 
-                (st.session_state.app_state.raw_x <= range_max_linear))
-        points_in_range = np.sum(mask)
-        st.info(f"Points in selected range: {points_in_range} / {len(st.session_state.app_state.raw_x)}")
+        points_in_range = end_idx - start_idx + 1
+        st.info(f"Points in selected range: {points_in_range} / {n_points} (indices {start_idx+1}-{end_idx+1})")
+        
+        # Store the X range values for compatibility with downstream code
+        st.session_state.app_state.x_range_min = range_min_linear
+        st.session_state.app_state.x_range_max = range_max_linear
         
         st.markdown("---")
         
@@ -2053,12 +2038,12 @@ elif st.session_state.app_state.current_step == 2:
                 st.rerun()
         with col_b:
             if st.button("✅ Apply & Continue", type="primary", use_container_width=True):
-                # Apply range selection to data using linear values
+                # Apply range selection to data using point indices
                 x_range, y_range = DataParser.apply_range_selection(
                     st.session_state.app_state.raw_x,
                     st.session_state.app_state.raw_y,
-                    range_min_linear,
-                    range_max_linear,
+                    start_idx,
+                    end_idx,
                     st.session_state.app_state.use_log_x
                 )
                 
@@ -2075,17 +2060,27 @@ elif st.session_state.app_state.current_step == 2:
         plotter = SpectrumPlotter()
         fig, ax = plt.subplots(figsize=(8, 5))
         
-        # Apply range selection to preview
-        range_min_linear_preview = range_min_linear if 'range_min_linear' in dir() else st.session_state.app_state.x_range_min
-        range_max_linear_preview = range_max_linear if 'range_max_linear' in dir() else st.session_state.app_state.x_range_max
-        
-        x_preview, y_preview = DataParser.apply_range_selection(
-            st.session_state.app_state.raw_x,
-            st.session_state.app_state.raw_y,
-            range_min_linear_preview if isinstance(range_min_linear_preview, float) else 10**st.session_state.app_state.x_range_min,
-            range_max_linear_preview if isinstance(range_max_linear_preview, float) else 10**st.session_state.app_state.x_range_max,
-            st.session_state.app_state.use_log_x
-        )
+        # Apply range selection to preview using indices
+        if 'start_idx' in locals() and 'end_idx' in locals():
+            x_preview, y_preview = DataParser.apply_range_selection(
+                st.session_state.app_state.raw_x,
+                st.session_state.app_state.raw_y,
+                start_idx,
+                end_idx,
+                st.session_state.app_state.use_log_x
+            )
+        else:
+            # Use stored indices if available
+            if st.session_state.app_state.point_range_start is not None:
+                x_preview, y_preview = DataParser.apply_range_selection(
+                    st.session_state.app_state.raw_x,
+                    st.session_state.app_state.raw_y,
+                    st.session_state.app_state.point_range_start,
+                    st.session_state.app_state.point_range_end,
+                    st.session_state.app_state.use_log_x
+                )
+            else:
+                x_preview, y_preview = st.session_state.app_state.raw_x, st.session_state.app_state.raw_y
         
         plotter.plot_raw_data(
             x_preview, y_preview,
@@ -2094,12 +2089,15 @@ elif st.session_state.app_state.current_step == 2:
             title="Selected Range Preview",
             ax=ax
         )
-        
+
         # Highlight selected range on full data plot
         if len(x_preview) < len(st.session_state.app_state.raw_x):
-            ax.axvspan(range_min_linear_preview if isinstance(range_min_linear_preview, float) else 10**st.session_state.app_state.x_range_min,
-                      range_max_linear_preview if isinstance(range_max_linear_preview, float) else 10**st.session_state.app_state.x_range_max,
-                      alpha=0.2, color='green', label='Selected Range')
+            # Get the X range of selected points
+            if len(x_preview) > 0:
+                x_min_selected = np.min(x_preview)
+                x_max_selected = np.max(x_preview)
+                ax.axvspan(x_min_selected, x_max_selected,
+                          alpha=0.2, color='green', label='Selected Range')
         
         st.pyplot(fig)
         plt.close()
