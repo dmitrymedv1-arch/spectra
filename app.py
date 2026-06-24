@@ -1964,7 +1964,7 @@ class SpectrumPlotter:
                     'hybrid': 'purple'
                 }
                 facecolor = method_colors.get(method, 'lime')
-                # Используем правильные названия цветов для темных оттенков
+                # Карта соответствия цветов для темных оттенков
                 dark_color_map = {
                     'green': 'darkgreen',
                     'cyan': 'darkcyan',
@@ -1973,28 +1973,6 @@ class SpectrumPlotter:
                     'lime': 'darkgreen'
                 }
                 marker_color = dark_color_map.get(facecolor, 'darkgreen')
-                # Для marker_color используем более темный оттенок
-                if method_color == 'green':
-                    marker_color = 'darkgreen'
-                elif method_color == 'cyan':
-                    marker_color = 'darkcyan'
-                elif method_color == 'magenta':
-                    marker_color = 'darkmagenta'
-                elif method_color == 'purple':
-                    marker_color = 'darkpurple'
-                else:
-                    marker_color = 'dark' + method_color
-            
-            # Проверяем, что цвета корректны
-            if not marker_color or not isinstance(marker_color, str):
-                marker_color = 'black'
-            if not facecolor or not isinstance(facecolor, str):
-                facecolor = 'gray'
-            
-            peak_y_original = info['y_original']
-            ax.plot(info['x_linear'], peak_y_original, 
-                    marker_style, markersize=marker_size, markeredgecolor=marker_color, 
-                    markerfacecolor=facecolor, zorder=3)
             
             peak_y_original = info['y_original']
             ax.plot(info['x_linear'], peak_y_original, 
