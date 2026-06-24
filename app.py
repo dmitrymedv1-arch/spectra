@@ -88,6 +88,8 @@ class AppState:
     aic_history: List[float] = field(default_factory=list)  # История AIC для отслеживания
     bic_history: List[float] = field(default_factory=list)  # История BIC для отслеживания
     peak_count_history: List[int] = field(default_factory=list)  # История числа пиков
+    # Новое поле для удаления пиков
+    peaks_to_remove: List[int] = field(default_factory=list)  # Список ID пиков для удаления
 
 # Initialize session state with dataclass
 if 'app_state' not in st.session_state:
@@ -1290,7 +1292,7 @@ class GaussianModel:
         gauss = GaussianModel.gaussian(x, amp, cen, sigma)
         # Для Лоренца используем gamma = sigma * 1.7 (приближенное соотношение)
         gamma = sigma * 1.7
-        lorentz = GaussianModel.lorentzian(x, amp, cen, gamma)
+        lorentz = GaussianModel.lorentzian(x, amp, cen, sigma)
         return eta * lorentz + (1 - eta) * gauss
     
     @staticmethod
@@ -1881,7 +1883,8 @@ class SpectrumPlotter:
     
     def plot_with_peaks(self, deconvolver, peak_info, y_smooth, 
                         title="Peak Detection", ax=None, figsize=(10, 6),
-                        manual_peak_position=None, manual_peak_source=None):
+                        manual_peak_position=None, manual_peak_source=None,
+                        peaks_to_remove=None):
         """Plot data with detected peaks and optional manual peak position indicator"""
         if ax is None:
             fig, ax = plt.subplots(figsize=figsize)
@@ -1919,15 +1922,30 @@ class SpectrumPlotter:
             'hybrid': 'purple'
         }
         
+        # Prepare peaks_to_remove set for quick lookup
+        remove_set = set(peaks_to_remove) if peaks_to_remove else set()
+        
         # Mark detected peaks with source-based colors
         for i, info in enumerate(peak_info):
             source = info.get('source', 'auto')
             color = source_colors.get(source, 'green')
-            marker_color = 'darkred' if source == 'auto' else 'darkorange' if source == 'manual' else 'darkblue'
-            facecolor = 'lime' if source == 'auto' else 'orange' if source == 'manual' else 'lightblue'
+            
+            # If peak is marked for removal, show it differently
+            if (i + 1) in remove_set:
+                marker_color = 'darkred'
+                facecolor = 'red'
+                marker_size = 12
+                # Add X mark on peak
+                ax.plot(info['x_linear'], info['y_original'], 
+                        'x', markersize=14, markeredgecolor='red', 
+                        markeredgewidth=2, zorder=5)
+            else:
+                marker_color = 'darkred' if source == 'auto' else 'darkorange' if source == 'manual' else 'darkblue'
+                facecolor = 'lime' if source == 'auto' else 'orange' if source == 'manual' else 'lightblue'
+                marker_size = 8
             
             # Use method-specific colors for hybrid detection
-            if 'method' in info:
+            if 'method' in info and (i + 1) not in remove_set:
                 method = info.get('method', 'auto')
                 method_colors = {
                     'find_peaks': 'green',
@@ -1939,13 +1957,20 @@ class SpectrumPlotter:
                 marker_color = 'dark' + facecolor
             
             peak_y_original = info['y_original']
-            ax.plot(info['x_linear'], peak_y_original, 
-                    'o', markersize=8, markeredgecolor=marker_color, 
-                    markerfacecolor=facecolor, zorder=3)
+            # Only plot circle marker if not marked for removal
+            if (i + 1) not in remove_set:
+                ax.plot(info['x_linear'], peak_y_original, 
+                        'o', markersize=marker_size, markeredgecolor=marker_color, 
+                        markerfacecolor=facecolor, zorder=3)
+            
+            # Always show label
+            label_color = 'red' if (i + 1) in remove_set else 'black'
             ax.text(info['x_linear'], peak_y_original * 1.05, 
                     f'{i+1}', ha='center', fontweight='bold', 
-                    fontsize=12, bbox=dict(boxstyle="round,pad=0.3", 
-                                          facecolor='white', alpha=0.8),
+                    fontsize=12, color=label_color,
+                    bbox=dict(boxstyle="round,pad=0.3", 
+                              facecolor='white' if (i + 1) not in remove_set else 'red', 
+                              alpha=0.8 if (i + 1) not in remove_set else 0.9),
                     zorder=4)
         
         # Show manual peak position indicator if provided
@@ -1978,6 +2003,8 @@ class SpectrumPlotter:
                 Patch(facecolor='orange', edgecolor='darkorange', label='Manually added peaks'),
                 Patch(facecolor='lightblue', edgecolor='darkblue', label='Residuals-found peaks')
             ]
+            if remove_set:
+                legend_elements.append(Patch(facecolor='red', edgecolor='darkred', label='Marked for removal'))
             ax.legend(handles=legend_elements, loc='upper right', fontsize=9)
         
         # Labels and title
@@ -3517,10 +3544,11 @@ elif st.session_state.app_state.current_step == 3:
             format="%.3f"
         )
         
+        # Расширен диапазон до 50
         st.session_state.app_state.min_distance = st.slider(
             "Minimum distance between peaks:",
             min_value=1,
-            max_value=40,
+            max_value=50,
             value=st.session_state.app_state.min_distance,
             step=1
         )
@@ -3550,6 +3578,8 @@ elif st.session_state.app_state.current_step == 3:
                 # Clear manual and residuals peaks
                 st.session_state.app_state.manual_peaks = []
                 st.session_state.app_state.residuals_peaks = []
+                # Clear peaks to remove
+                st.session_state.app_state.peaks_to_remove = []
                 st.success(f"Found {len(peak_info)} peaks!")
         
         if st.session_state.app_state.peak_info is not None:
@@ -3738,6 +3768,8 @@ elif st.session_state.app_state.current_step == 3:
                                 })
                             
                             st.session_state.app_state.peak_info = new_peak_info
+                            # Clear peaks_to_remove after optimization
+                            st.session_state.app_state.peaks_to_remove = []
                             st.rerun()
             
             st.markdown("---")
@@ -3796,7 +3828,8 @@ elif st.session_state.app_state.current_step == 3:
                     y_smooth,
                     title=f"Peak Detection - {len(st.session_state.app_state.peak_info)} peaks found",
                     ax=ax,
-                    manual_peak_position=manual_pos
+                    manual_peak_position=manual_pos,
+                    peaks_to_remove=st.session_state.app_state.peaks_to_remove
                 )
                 st.pyplot(fig)
                 plt.close()
@@ -3810,6 +3843,7 @@ elif st.session_state.app_state.current_step == 3:
                 - 🟣 Purple: Hybrid method
                 - 🟦 Cyan: Second derivative method
                 - 🟪 Magenta: CWT method
+                - ❌ Red X: Marked for removal
                 """)
             
             with tab2:
@@ -3838,8 +3872,21 @@ elif st.session_state.app_state.current_step == 3:
                 plt.close()
             
             with tab3:
-                # Create a table with peak information including source and method
-                data = []
+                # Create table with checkboxes for peak removal
+                st.subheader("Peak Management")
+                st.info("Select peaks you want to remove, then click 'Confirm and remove selected peaks'")
+                
+                # Display count of selected peaks
+                if st.session_state.app_state.peaks_to_remove:
+                    st.warning(f"Selected for removal: {len(st.session_state.app_state.peaks_to_remove)} peaks")
+                else:
+                    st.success("No peaks selected for removal")
+                
+                # Create the table with checkboxes
+                st.markdown("---")
+                
+                # Prepare data for table
+                table_data = []
                 for i, info in enumerate(st.session_state.app_state.peak_info):
                     source = info.get('source', 'auto')
                     method = info.get('method', 'auto')
@@ -3861,8 +3908,12 @@ elif st.session_state.app_state.current_step == 3:
                     elif method == 'aic_bic_optimized':
                         method_display = 'AIC/BIC'
                     
-                    data.append({
-                        'Peak': i + 1,
+                    # Check if peak is marked for removal
+                    is_marked = (i + 1) in st.session_state.app_state.peaks_to_remove
+                    
+                    table_data.append({
+                        'Peak #': i + 1,
+                        'Select': is_marked,
                         'Source': f"{source_icon} {source}",
                         'Method': method_display,
                         'X Center': f"{info['x_linear']:.4e}",
@@ -3870,8 +3921,145 @@ elif st.session_state.app_state.current_step == 3:
                         'Estimated Sigma': f"{info['sigma_est']:.4f}",
                     })
                 
-                df = pd.DataFrame(data)
-                st.dataframe(df, use_container_width=True)
+                # Create DataFrame for display
+                df_peaks = pd.DataFrame(table_data)
+                
+                # Display as interactive table with checkboxes
+                # We need to use st.columns to create checkboxes that don't rerun immediately
+                # We'll use a form to batch the updates
+                
+                # Create columns for the table header
+                col_peak, col_select, col_source, col_method, col_x, col_y, col_sigma = st.columns([0.5, 0.7, 0.8, 0.8, 1.2, 1.2, 1.0])
+                
+                with col_peak:
+                    st.write("**Peak #**")
+                with col_select:
+                    st.write("**Select**")
+                with col_source:
+                    st.write("**Source**")
+                with col_method:
+                    st.write("**Method**")
+                with col_x:
+                    st.write("**X Center**")
+                with col_y:
+                    st.write("**Y Amplitude**")
+                with col_sigma:
+                    st.write("**Sigma**")
+                
+                st.markdown("---")
+                
+                # Create a form to prevent immediate reruns
+                with st.form(key="peak_removal_form"):
+                    # Initialize list to track current selections
+                    current_selections = []
+                    
+                    # Display each peak with a checkbox
+                    for i, row in enumerate(table_data):
+                        col_peak, col_select, col_source, col_method, col_x, col_y, col_sigma = st.columns([0.5, 0.7, 0.8, 0.8, 1.2, 1.2, 1.0])
+                        
+                        with col_peak:
+                            st.write(f"**{row['Peak #']}**")
+                        
+                        with col_select:
+                            # Use a unique key for each checkbox
+                            checkbox_key = f"remove_peak_{i}"
+                            is_checked = st.checkbox(
+                                "", 
+                                value=row['Select'],
+                                key=checkbox_key
+                            )
+                            if is_checked:
+                                current_selections.append(row['Peak #'])
+                        
+                        with col_source:
+                            st.write(row['Source'])
+                        
+                        with col_method:
+                            st.write(row['Method'])
+                        
+                        with col_x:
+                            st.write(row['X Center'])
+                        
+                        with col_y:
+                            st.write(row['Y Amplitude'])
+                        
+                        with col_sigma:
+                            st.write(row['Estimated Sigma'])
+                    
+                    st.markdown("---")
+                    
+                    # Submit button for the form
+                    col_submit1, col_submit2 = st.columns(2)
+                    with col_submit1:
+                        submit_button = st.form_submit_button(
+                            "✅ Confirm and remove selected peaks", 
+                            use_container_width=True,
+                            type="primary"
+                        )
+                    
+                    with col_submit2:
+                        # Clear selections button
+                        clear_button = st.form_submit_button(
+                            "🔄 Clear all selections", 
+                            use_container_width=True
+                        )
+                    
+                    # Handle form submission
+                    if submit_button:
+                        if current_selections:
+                            # Remove selected peaks
+                            peak_info = st.session_state.app_state.peak_info
+                            initial_params = st.session_state.app_state.initial_params
+                            
+                            # Get parameters per peak
+                            params_per_peak = 4 if st.session_state.app_state.model_type in ['pseudo_voigt', 'voigt'] else 3
+                            
+                            # Create new lists without the selected peaks
+                            new_peak_info = []
+                            new_initial_params = []
+                            removed_ids = set(current_selections)
+                            
+                            for idx, info in enumerate(peak_info):
+                                peak_id = idx + 1
+                                if peak_id not in removed_ids:
+                                    new_peak_info.append(info)
+                                    # Add corresponding parameters
+                                    base_idx = idx * params_per_peak
+                                    for j in range(params_per_peak):
+                                        if base_idx + j < len(initial_params):
+                                            new_initial_params.append(initial_params[base_idx + j])
+                            
+                            # Update session state
+                            st.session_state.app_state.peak_info = new_peak_info
+                            st.session_state.app_state.initial_params = new_initial_params
+                            st.session_state.app_state.peaks_to_remove = []
+                            
+                            # Remove from manual and residuals lists if present
+                            new_manual_peaks = []
+                            for p in st.session_state.app_state.manual_peaks:
+                                # Find the peak in new_peak_info
+                                if any(info.get('x_linear') == p.get('x_linear') and 
+                                       info.get('y_original') == p.get('y_original') 
+                                       for info in new_peak_info):
+                                    new_manual_peaks.append(p)
+                            st.session_state.app_state.manual_peaks = new_manual_peaks
+                            
+                            new_residuals_peaks = []
+                            for p in st.session_state.app_state.residuals_peaks:
+                                if any(info.get('x_linear') == p.get('x_linear') and 
+                                       info.get('y_original') == p.get('y_original') 
+                                       for info in new_peak_info):
+                                    new_residuals_peaks.append(p)
+                            st.session_state.app_state.residuals_peaks = new_residuals_peaks
+                            
+                            st.success(f"Removed {len(current_selections)} peaks. Remaining: {len(new_peak_info)}")
+                            st.rerun()
+                        else:
+                            st.warning("No peaks selected for removal")
+                    
+                    if clear_button:
+                        st.session_state.app_state.peaks_to_remove = []
+                        st.rerun()
                 
                 # Show peak detection statistics
                 st.markdown("---")
