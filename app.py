@@ -3520,7 +3520,7 @@ elif st.session_state.app_state.current_step == 3:
         st.session_state.app_state.min_distance = st.slider(
             "Minimum distance between peaks:",
             min_value=1,
-            max_value=20,
+            max_value=40,
             value=st.session_state.app_state.min_distance,
             step=1
         )
