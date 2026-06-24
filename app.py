@@ -3703,7 +3703,11 @@ elif st.session_state.app_state.current_step == 3:
                                 base = i * params_per_peak
                                 amp = st.session_state.app_state.initial_params[base]
                                 cen = st.session_state.app_state.initial_params[base + 1]
-                                sigma = st.session_state.app_state.initial_params[base + 2]
+                                if base + 2 < len(st.session_state.app_state.initial_params):
+                                    sigma = st.session_state.app_state.initial_params[base + 2]
+                                else:
+                                    # Если параметров недостаточно, используем оценку
+                                    sigma = 0.01 * (np.max(deconv.x) - np.min(deconv.x)) / 20
                                 if params_per_peak == 4:
                                     eta = st.session_state.app_state.initial_params[base + 3]
                                 else:
