@@ -2114,7 +2114,11 @@ class SpectrumPlotter:
                     if c.get('model_type', 'gaussian') in ['gaussian', 'lorentzian']:
                         peak_params.extend([c['amp_norm'], c['cen_log'], c['sigma_log']])
                     else:
-                        peak_params.extend([c['amp_norm'], c['cen_log'], c['sigma_log'], c.get('eta', 0.5)])
+                        # Для pseudo_voigt и voigt используем 4 параметра
+                        if c.get('model_type', 'gaussian') == 'pseudo_voigt':
+                            peak_params.extend([c['amp_norm'], c['cen_log'], c['sigma_log'], c.get('eta', 0.5)])
+                        else:  # voigt
+                            peak_params.extend([c['amp_norm'], c['cen_log'], c['sigma_log'], c.get('gamma', c['sigma_log'] * 0.5)])
                 
                 # Use appropriate model for total fit
                 model_type = deconvolver.model_type if hasattr(deconvolver, 'model_type') else 'gaussian'
@@ -2124,8 +2128,17 @@ class SpectrumPlotter:
                     y_total = GaussianModel.multi_lorentzian(x_dense_log, *peak_params) * deconvolver.y_max
                 elif model_type == 'pseudo_voigt':
                     y_total = GaussianModel.multi_pseudo_voigt(x_dense_log, *peak_params) * deconvolver.y_max
-                else:
+                elif model_type == 'voigt':
                     y_total = GaussianModel.multi_voigt(x_dense_log, *peak_params) * deconvolver.y_max
+                else:
+                    # Fallback для неизвестного типа
+                    y_total = GaussianModel.multi_gaussian(x_dense_log, *peak_params[:n_peaks*3]) * deconvolver.y_max
+            else:
+                # Если нет baseline_params
+                if deconvolver.popt is not None:
+                    y_total = GaussianModel.multi_gaussian(x_dense_log, *deconvolver.popt) * deconvolver.y_max
+                else:
+                    y_total = np.zeros_like(x_dense)
                 
                 # Add baseline
                 if deconvolver.baseline_method == 'constant':
@@ -4467,7 +4480,11 @@ elif st.session_state.app_state.current_step == 5:
                         if c.get('model_type', 'gaussian') in ['gaussian', 'lorentzian']:
                             peak_params.extend([c['amp_norm'], c['cen_log'], c['sigma_log']])
                         else:
-                            peak_params.extend([c['amp_norm'], c['cen_log'], c['sigma_log'], c.get('eta', 0.5)])
+                            # Для pseudo_voigt и voigt используем 4 параметра
+                            if c.get('model_type', 'gaussian') == 'pseudo_voigt':
+                                peak_params.extend([c['amp_norm'], c['cen_log'], c['sigma_log'], c.get('eta', 0.5)])
+                            else:  # voigt
+                                peak_params.extend([c['amp_norm'], c['cen_log'], c['sigma_log'], c.get('gamma', c['sigma_log'] * 0.5)])
                     
                     if deconv.model_type == 'gaussian':
                         y_total_norm = GaussianModel.multi_gaussian(x_dense_log, *peak_params) * deconv.y_max / max_amp
@@ -4475,8 +4492,10 @@ elif st.session_state.app_state.current_step == 5:
                         y_total_norm = GaussianModel.multi_lorentzian(x_dense_log, *peak_params) * deconv.y_max / max_amp
                     elif deconv.model_type == 'pseudo_voigt':
                         y_total_norm = GaussianModel.multi_pseudo_voigt(x_dense_log, *peak_params) * deconv.y_max / max_amp
-                    else:
+                    elif deconv.model_type == 'voigt':
                         y_total_norm = GaussianModel.multi_voigt(x_dense_log, *peak_params) * deconv.y_max / max_amp
+                    else:
+                        y_total_norm = GaussianModel.multi_gaussian(x_dense_log, *peak_params[:n_peaks*3]) * deconv.y_max / max_amp
                     
                     # Add baseline
                     if deconv.baseline_method == 'constant':
