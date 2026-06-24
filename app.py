@@ -2150,8 +2150,6 @@ class SpectrumPlotter:
                     y_total += (deconvolver.baseline_params[0] + 
                                deconvolver.baseline_params[1] * x_dense_log +
                                deconvolver.baseline_params[2] * x_dense_log**2) * deconvolver.y_max
-            else:
-                y_total = GaussianModel.multi_gaussian(x_dense_log, *deconvolver.popt) * deconvolver.y_max
             
             ax.plot(x_dense, y_total, 'r--', linewidth=2, label='Total Fit', zorder=3)
         
