@@ -2106,50 +2106,16 @@ class SpectrumPlotter:
             ax.plot(x_dense, y_total, 'b--', linewidth=2, 
                    label='Preview (no fit)', zorder=3, alpha=0.7)
         elif deconvolver.fit_y_norm is not None:
-            # Reconstruct total fit with baseline
-            if hasattr(deconvolver, 'baseline_params') and deconvolver.baseline_params:
-                n_peaks = len(deconvolver.components)
-                peak_params = []
-                for c in deconvolver.components:
-                    if c.get('model_type', 'gaussian') in ['gaussian', 'lorentzian']:
-                        peak_params.extend([c['amp_norm'], c['cen_log'], c['sigma_log']])
-                    else:
-                        # Для pseudo_voigt и voigt используем 4 параметра
-                        if c.get('model_type', 'gaussian') == 'pseudo_voigt':
-                            peak_params.extend([c['amp_norm'], c['cen_log'], c['sigma_log'], c.get('eta', 0.5)])
-                        else:  # voigt
-                            peak_params.extend([c['amp_norm'], c['cen_log'], c['sigma_log'], c.get('gamma', c['sigma_log'] * 0.5)])
-                
-                # Use appropriate model for total fit
-                model_type = deconvolver.model_type if hasattr(deconvolver, 'model_type') else 'gaussian'
-                if model_type == 'gaussian':
-                    y_total = GaussianModel.multi_gaussian(x_dense_log, *peak_params) * deconvolver.y_max
-                elif model_type == 'lorentzian':
-                    y_total = GaussianModel.multi_lorentzian(x_dense_log, *peak_params) * deconvolver.y_max
-                elif model_type == 'pseudo_voigt':
-                    y_total = GaussianModel.multi_pseudo_voigt(x_dense_log, *peak_params) * deconvolver.y_max
-                elif model_type == 'voigt':
-                    y_total = GaussianModel.multi_voigt(x_dense_log, *peak_params) * deconvolver.y_max
-                else:
-                    # Fallback для неизвестного типа
-                    y_total = GaussianModel.multi_gaussian(x_dense_log, *peak_params[:n_peaks*3]) * deconvolver.y_max
-            else:
-                # Если нет baseline_params
-                if deconvolver.popt is not None:
-                    y_total = GaussianModel.multi_gaussian(x_dense_log, *deconvolver.popt) * deconvolver.y_max
-                else:
-                    y_total = np.zeros_like(x_dense)
-                
-                # Add baseline
-                if deconvolver.baseline_method == 'constant':
-                    y_total += deconvolver.baseline_params[0] * deconvolver.y_max
-                elif deconvolver.baseline_method == 'linear':
-                    y_total += (deconvolver.baseline_params[0] + 
-                               deconvolver.baseline_params[1] * x_dense_log) * deconvolver.y_max
-                elif deconvolver.baseline_method == 'quadratic':
-                    y_total += (deconvolver.baseline_params[0] + 
-                               deconvolver.baseline_params[1] * x_dense_log +
-                               deconvolver.baseline_params[2] * x_dense_log**2) * deconvolver.y_max
+            # Используем уже готовый fit из deconvolver
+            # Интерполируем fit_y_norm на плотную сетку x_dense
+            from scipy.interpolate import interp1d
+            
+            # Создаем интерполяционную функцию на основе сохраненных x и fit_y_norm
+            fit_interp = interp1d(deconvolver.x, deconvolver.fit_y_norm, 
+                                  kind='linear', fill_value='extrapolate')
+            
+            # Вычисляем значения на плотной сетке
+            y_total = fit_interp(x_dense_log) * deconvolver.y_max
             
             ax.plot(x_dense, y_total, 'r--', linewidth=2, label='Total Fit', zorder=3)
         
