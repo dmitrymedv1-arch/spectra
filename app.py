@@ -4437,41 +4437,17 @@ elif st.session_state.app_state.current_step == 5:
                                label=f'Peak {c["id"]}: {c["fraction_percent"]:.1f}%', zorder=2)
                 
                 # Plot normalized total fit
-                if deconv.baseline_method != 'none' and deconv.baseline_params:
-                    n_peaks = len(deconv.components)
-                    peak_params = []
-                    for c in deconv.components:
-                        if c.get('model_type', 'gaussian') in ['gaussian', 'lorentzian']:
-                            peak_params.extend([c['amp_norm'], c['cen_log'], c['sigma_log']])
-                        else:
-                            # Для pseudo_voigt и voigt используем 4 параметра
-                            if c.get('model_type', 'gaussian') == 'pseudo_voigt':
-                                peak_params.extend([c['amp_norm'], c['cen_log'], c['sigma_log'], c.get('eta', 0.5)])
-                            else:  # voigt
-                                peak_params.extend([c['amp_norm'], c['cen_log'], c['sigma_log'], c.get('gamma', c['sigma_log'] * 0.5)])
+                if deconv.fit_y_norm is not None:
+                    from scipy.interpolate import interp1d
                     
-                    if deconv.model_type == 'gaussian':
-                        y_total_norm = GaussianModel.multi_gaussian(x_dense_log, *peak_params) * deconv.y_max / max_amp
-                    elif deconv.model_type == 'lorentzian':
-                        y_total_norm = GaussianModel.multi_lorentzian(x_dense_log, *peak_params) * deconv.y_max / max_amp
-                    elif deconv.model_type == 'pseudo_voigt':
-                        y_total_norm = GaussianModel.multi_pseudo_voigt(x_dense_log, *peak_params) * deconv.y_max / max_amp
-                    elif deconv.model_type == 'voigt':
-                        y_total_norm = GaussianModel.multi_voigt(x_dense_log, *peak_params) * deconv.y_max / max_amp
-                    else:
-                        y_total_norm = GaussianModel.multi_gaussian(x_dense_log, *peak_params[:n_peaks*3]) * deconv.y_max / max_amp
+                    # Создаем интерполяционную функцию на основе сохраненных x и fit_y_norm
+                    fit_interp = interp1d(deconv.x, deconv.fit_y_norm, 
+                                          kind='linear', fill_value='extrapolate')
                     
-                    # Add baseline
-                    if deconv.baseline_method == 'constant':
-                        y_total_norm += deconv.baseline_params[0] * deconv.y_max / max_amp
-                    elif deconv.baseline_method == 'linear':
-                        y_total_norm += (deconv.baseline_params[0] + deconv.baseline_params[1] * x_dense_log) * deconv.y_max / max_amp
-                    elif deconv.baseline_method == 'quadratic':
-                        y_total_norm += (deconv.baseline_params[0] + deconv.baseline_params[1] * x_dense_log + deconv.baseline_params[2] * x_dense_log**2) * deconv.y_max / max_amp
-                else:
-                    y_total_norm = GaussianModel.multi_gaussian(x_dense_log, *deconv.popt) * deconv.y_max / max_amp
-                
-                ax_norm.plot(x_dense, y_total_norm, 'r--', linewidth=2, label='Total Fit', zorder=3)
+                    # Вычисляем значения на плотной сетке и нормализуем
+                    y_total_norm = fit_interp(x_dense_log) * deconv.y_max / max_amp
+                    
+                    ax_norm.plot(x_dense, y_total_norm, 'r--', linewidth=2, label='Total Fit', zorder=3)
                 
                 # Plot original data (normalized)
                 y_original_norm = deconv.y_original / max_amp
