@@ -1963,8 +1963,16 @@ class SpectrumPlotter:
                     'cwt': 'magenta',
                     'hybrid': 'purple'
                 }
-                method_color = method_colors.get(method, 'lime')
-                facecolor = method_color
+                facecolor = method_colors.get(method, 'lime')
+                # Используем правильные названия цветов для темных оттенков
+                dark_color_map = {
+                    'green': 'darkgreen',
+                    'cyan': 'darkcyan',
+                    'magenta': 'darkmagenta',
+                    'purple': 'darkviolet',
+                    'lime': 'darkgreen'
+                }
+                marker_color = dark_color_map.get(facecolor, 'darkgreen')
                 # Для marker_color используем более темный оттенок
                 if method_color == 'green':
                     marker_color = 'darkgreen'
