@@ -3671,17 +3671,21 @@ elif st.session_state.app_state.current_step == 3:
                             baseline_method=st.session_state.app_state.baseline_method
                         )
                         
-                        # Evaluate different numbers of peaks
-                        best_params, best_n, aic_hist, bic_hist, count_hist = AICBICController.find_optimal_peak_count(
-                            st.session_state.app_state.deconvolver.x,
-                            st.session_state.app_state.deconvolver.y_norm,
-                            initial_params,
-                            max_peaks=min(n_peaks + 5, 30),
-                            model_type=st.session_state.app_state.model_type,
-                            threshold=st.session_state.app_state.aic_bic_threshold,
-                            method=st.session_state.app_state.fitting_method,
-                            maxfev=st.session_state.app_state.max_nfev
-                        )
+                        params_per_peak = 4 if st.session_state.app_state.model_type in ['pseudo_voigt', 'voigt'] else 3
+                        if len(initial_params) < params_per_peak:
+                            st.warning("Not enough parameters for AIC/BIC optimization. Please run peak detection first.")
+                        else:
+                            # Evaluate different numbers of peaks
+                            best_params, best_n, aic_hist, bic_hist, count_hist = AICBICController.find_optimal_peak_count(
+                                st.session_state.app_state.deconvolver.x,
+                                st.session_state.app_state.deconvolver.y_norm,
+                                initial_params,
+                                max_peaks=min(n_peaks + 5, 30),
+                                model_type=st.session_state.app_state.model_type,
+                                threshold=st.session_state.app_state.aic_bic_threshold,
+                                method=st.session_state.app_state.fitting_method,
+                                maxfev=st.session_state.app_state.max_nfev
+                            )
                         
                         if aic_hist and bic_hist:
                             # Update parameters
@@ -3704,20 +3708,26 @@ elif st.session_state.app_state.current_step == 3:
                             st.pyplot(fig)
                             plt.close()
                             
-                            # Update peak_info to match new parameters
                             params_per_peak = 4 if st.session_state.app_state.model_type in ['pseudo_voigt', 'voigt'] else 3
                             new_peak_info = []
                             for i in range(best_n):
                                 base = i * params_per_peak
+                                
+                                # Проверяем, что достаточно параметров
+                                if base + 2 >= len(st.session_state.app_state.initial_params):
+                                    # Если параметров недостаточно, выходим из цикла
+                                    break
+                                
                                 amp = st.session_state.app_state.initial_params[base]
                                 cen = st.session_state.app_state.initial_params[base + 1]
-                                if base + 2 < len(st.session_state.app_state.initial_params):
-                                    sigma = st.session_state.app_state.initial_params[base + 2]
-                                else:
-                                    # Если параметров недостаточно, используем оценку
-                                    sigma = 0.01 * (np.max(deconv.x) - np.min(deconv.x)) / 20
+                                sigma = st.session_state.app_state.initial_params[base + 2]
+                                
+                                # Для моделей с 4 параметрами
                                 if params_per_peak == 4:
-                                    eta = st.session_state.app_state.initial_params[base + 3]
+                                    if base + 3 < len(st.session_state.app_state.initial_params):
+                                        eta = st.session_state.app_state.initial_params[base + 3]
+                                    else:
+                                        eta = 0.5  # Значение по умолчанию
                                 else:
                                     eta = 0.5
                                 
@@ -3727,7 +3737,7 @@ elif st.session_state.app_state.current_step == 3:
                                 else:
                                     x_linear = cen
                                 idx = np.argmin(np.abs(deconv.x_sorted - x_linear))
-                                y_original = deconv.y_sorted[idx]
+                                y_original = deconv.y_sorted[idx] if idx < len(deconv.y_sorted) else 0
                                 
                                 new_peak_info.append({
                                     'index': idx,
