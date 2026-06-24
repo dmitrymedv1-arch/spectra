@@ -1922,17 +1922,13 @@ class SpectrumPlotter:
             'hybrid': 'purple'
         }
         
-        # Get list of peaks to remove
-        if peaks_to_remove is None:
-            peaks_to_remove = []
-        
         # Mark detected peaks with source-based colors
         for i, info in enumerate(peak_info):
             source = info.get('source', 'auto')
             color = source_colors.get(source, 'green')
             
             # Check if this peak is marked for removal
-            is_marked_for_removal = (i + 1) in peaks_to_remove
+            is_marked_for_removal = (i + 1) in peaks_to_remove if peaks_to_remove else False
             
             if is_marked_for_removal:
                 # Red color for marked peaks
@@ -1941,8 +1937,20 @@ class SpectrumPlotter:
                 marker_size = 12
                 marker_style = 's'  # Square for marked peaks
             else:
-                marker_color = 'darkred' if source == 'auto' else 'darkorange' if source == 'manual' else 'darkblue'
-                facecolor = 'lime' if source == 'auto' else 'orange' if source == 'manual' else 'lightblue'
+                # Определяем цвета в зависимости от источника
+                if source == 'auto':
+                    marker_color = 'darkred'
+                    facecolor = 'lime'
+                elif source == 'manual':
+                    marker_color = 'darkorange'
+                    facecolor = 'orange'
+                elif source == 'residuals':
+                    marker_color = 'darkblue'
+                    facecolor = 'lightblue'
+                else:
+                    marker_color = 'darkgreen'
+                    facecolor = 'green'
+                
                 marker_size = 8
                 marker_style = 'o'
             
@@ -1955,8 +1963,30 @@ class SpectrumPlotter:
                     'cwt': 'magenta',
                     'hybrid': 'purple'
                 }
-                facecolor = method_colors.get(method, 'lime')
-                marker_color = 'dark' + facecolor
+                method_color = method_colors.get(method, 'lime')
+                facecolor = method_color
+                # Для marker_color используем более темный оттенок
+                if method_color == 'green':
+                    marker_color = 'darkgreen'
+                elif method_color == 'cyan':
+                    marker_color = 'darkcyan'
+                elif method_color == 'magenta':
+                    marker_color = 'darkmagenta'
+                elif method_color == 'purple':
+                    marker_color = 'darkpurple'
+                else:
+                    marker_color = 'dark' + method_color
+            
+            # Проверяем, что цвета корректны
+            if not marker_color or not isinstance(marker_color, str):
+                marker_color = 'black'
+            if not facecolor or not isinstance(facecolor, str):
+                facecolor = 'gray'
+            
+            peak_y_original = info['y_original']
+            ax.plot(info['x_linear'], peak_y_original, 
+                    marker_style, markersize=marker_size, markeredgecolor=marker_color, 
+                    markerfacecolor=facecolor, zorder=3)
             
             peak_y_original = info['y_original']
             ax.plot(info['x_linear'], peak_y_original, 
