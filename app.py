@@ -2,9 +2,12 @@ import streamlit as st
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from scipy.signal import savgol_filter, find_peaks, peak_widths
+from scipy.signal import savgol_filter, find_peaks, peak_widths, find_peaks_cwt
 from scipy.optimize import curve_fit, least_squares
 from scipy.ndimage import gaussian_filter1d
+from scipy.special import voigt_profile
+from scipy.sparse import diags
+from scipy.linalg import solve_banded
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import re
@@ -14,6 +17,16 @@ import warnings
 from dataclasses import dataclass, field
 from typing import Optional, Tuple, List, Dict, Any, Callable
 import time
+import json
+import os
+
+# Попытка импорта pybaselines для улучшенной коррекции фона
+try:
+    from pybaselines import Baseline
+    HAS_PYBASELINES = True
+except ImportError:
+    HAS_PYBASELINES = False
+    warnings.warn("pybaselines not installed. Install with: pip install pybaselines")
 
 # ==================== STATE MANAGEMENT ====================
 
@@ -39,23 +52,42 @@ class AppState:
     point_range_end: Optional[int] = None
     clip_negative: bool = True
     fitting_method: str = 'trf'
-    max_nfev: int = 5000  # Уменьшено с 10000 для скорости
+    max_nfev: int = 5000
     show_warnings: bool = True
-    baseline_method: str = 'none'  # 'none', 'constant', 'linear', 'quadratic'
+    baseline_method: str = 'arpls'  # Изменено с 'none' на 'arpls' по умолчанию
     baseline_degree: int = 1
-    fit_quality: str = 'balanced'  # 'fast', 'balanced', 'precise'
-    last_popt: Optional[np.ndarray] = None  # Кэш последних параметров
-    pending_split: Optional[Tuple[int, float]] = None  # Ожидающие операции
+    baseline_lam: float = 1e5  # Новый параметр для arPLS
+    baseline_p: float = 0.01   # Новый параметр для arPLS
+    fit_quality: str = 'balanced'
+    last_popt: Optional[np.ndarray] = None
+    pending_split: Optional[Tuple[int, float]] = None
     pending_remove: Optional[int] = None
     preview_mode: bool = False
-    # Новые атрибуты для сглаживания и ручного добавления пиков
-    smoothing_level: str = 'none'  # 'none', 'light', 'medium', 'strong', 'adaptive'
-    manual_peaks: List[Dict] = field(default_factory=list)  # Вручную добавленные пики
-    residuals_peaks: List[Dict] = field(default_factory=list)  # Пики, найденные по остаткам
-    peak_sources: Dict[int, str] = field(default_factory=dict)  # Источник каждого пика (auto/manual/residuals)
-    manual_peak_position: Optional[float] = None  # Текущая позиция для ручного добавления
-    show_smoothing_preview: bool = False  # Показывать превью сглаживания
-    auto_smooth_suggested: bool = False  # Предложение включить сглаживание
+    smoothing_level: str = 'adaptive'  # Изменено с 'none' на 'adaptive'
+    manual_peaks: List[Dict] = field(default_factory=list)
+    residuals_peaks: List[Dict] = field(default_factory=list)
+    peak_sources: Dict[int, str] = field(default_factory=dict)
+    manual_peak_position: Optional[float] = None
+    show_smoothing_preview: bool = False
+    auto_smooth_suggested: bool = False
+    # Новые поля для улучшенной функциональности
+    peak_detection_method: str = 'hybrid'  # 'hybrid', 'find_peaks', 'second_derivative', 'cwt'
+    model_type: str = 'pseudo_voigt'  # 'gaussian', 'lorentzian', 'pseudo_voigt', 'voigt'
+    use_aic_bic_control: bool = True  # Автоматический контроль числа пиков
+    aic_bic_threshold: float = 2.0  # Минимальное улучшение AIC для добавления пика
+    show_residuals_peaks: bool = True  # Показывать пики из остатков
+    adaptive_smoothing_factor: float = 1.0  # Фактор адаптивного сглаживания
+    baseline_iterations: int = 10  # Число итераций для arPLS
+    auto_detect_baseline: bool = True  # Автоопределение параметров фона
+    peak_prominence: float = 0.01  # Для find_peaks
+    peak_width_min: float = 0.5  # Минимальная ширина пика
+    peak_width_max: float = 50.0  # Максимальная ширина пика
+    use_adaptive_smoothing: bool = True  # Использовать адаптивное сглаживание
+    voigt_sigma_guess: float = 1.0  # Начальное приближение sigma для Voigt
+    voigt_gamma_guess: float = 0.5  # Начальное приближение gamma для Voigt
+    aic_history: List[float] = field(default_factory=list)  # История AIC для отслеживания
+    bic_history: List[float] = field(default_factory=list)  # История BIC для отслеживания
+    peak_count_history: List[int] = field(default_factory=list)  # История числа пиков
 
 # Initialize session state with dataclass
 if 'app_state' not in st.session_state:
@@ -122,10 +154,731 @@ plt.rcParams.update({
 })
 
 # Title
-st.title("📊 Gaussian Deconvolution of Spectral Data")
+st.title("📊 Advanced Spectral Deconvolution")
 st.markdown("---")
 
-# ==================== CLASSES ====================
+# ==================== NEW CLASSES ====================
+
+class AdaptiveSmoother:
+    """
+    Адаптивное сглаживание: размер окна зависит от локального шума.
+    В областях с большим шумом применяется более сильное сглаживание.
+    """
+    
+    @staticmethod
+    def adaptive_savgol(y, base_window=5, noise_threshold=0.1, max_window_factor=5):
+        """
+        Адаптивное сглаживание Савицким-Голаем.
+        
+        Parameters:
+        -----------
+        y : array_like
+            Входные данные
+        base_window : int
+            Базовый размер окна (минимальный)
+        noise_threshold : float
+            Порог шума для увеличения окна
+        max_window_factor : int
+            Максимальный множитель для увеличения окна
+        
+        Returns:
+        --------
+        y_smooth : array_like
+            Сглаженные данные
+        """
+        n = len(y)
+        y_smooth = np.zeros_like(y, dtype=float)
+        
+        # Оцениваем локальный шум как абсолютную разность между соседними точками
+        local_noise = np.abs(np.diff(y))
+        # Добавляем первую точку для сохранения размера
+        local_noise = np.concatenate([[local_noise[0]], local_noise])
+        
+        # Нормализуем шум относительно среднего значения
+        mean_y = np.mean(np.abs(y)) if np.mean(np.abs(y)) > 0 else 1.0
+        noise_level = local_noise / (mean_y + 1e-12)
+        
+        for i in range(n):
+            # Определяем размер окна на основе локального шума
+            noise_factor = min(noise_level[i] / noise_threshold, max_window_factor)
+            window = base_window + int(noise_factor * 4)
+            
+            # Обеспечиваем нечетность окна и минимальный размер
+            window = max(window, 3)
+            if window % 2 == 0:
+                window += 1
+            window = min(window, n - 1 if n % 2 == 0 else n)
+            if window < 3:
+                window = 3
+            
+            # Применяем Savitzky-Golay к окну
+            half = window // 2
+            start = max(0, i - half)
+            end = min(n, i + half + 1)
+            
+            if end - start < 3:
+                y_smooth[i] = y[i]
+            else:
+                try:
+                    # Используем полином 2-й степени для малых окон
+                    polyorder = min(2, end - start - 1)
+                    if polyorder >= 1:
+                        # Для малых окон используем простое среднее
+                        if end - start <= 5:
+                            y_smooth[i] = np.mean(y[start:end])
+                        else:
+                            y_smooth[i] = savgol_filter(y[start:end], end - start if (end - start) % 2 == 1 else end - start - 1, polyorder)[i - start]
+                    else:
+                        y_smooth[i] = np.mean(y[start:end])
+                except Exception:
+                    y_smooth[i] = y[i]
+        
+        return y_smooth
+    
+    @staticmethod
+    def estimate_noise_level(y, method='mad'):
+        """
+        Оценка уровня шума в данных.
+        
+        Parameters:
+        -----------
+        y : array_like
+            Входные данные
+        method : str
+            Метод оценки шума: 'mad' (медианное абсолютное отклонение) или 'std'
+        
+        Returns:
+        --------
+        noise_level : float
+            Оценка уровня шума
+        """
+        if method == 'mad':
+            # Median Absolute Deviation
+            median = np.median(y)
+            mad = np.median(np.abs(y - median))
+            return mad * 1.4826  # Масштабируем для нормального распределения
+        else:
+            # Стандартное отклонение
+            return np.std(y)
+    
+    @staticmethod
+    def suggest_smoothing_level(y, target_snr=10.0):
+        """
+        Предлагает уровень сглаживания на основе отношения сигнал/шум.
+        
+        Parameters:
+        -----------
+        y : array_like
+            Входные данные
+        target_snr : float
+            Целевое отношение сигнал/шум
+        
+        Returns:
+        --------
+        suggested_level : str
+            Предлагаемый уровень сглаживания ('none', 'light', 'medium', 'strong')
+        """
+        noise = AdaptiveSmoother.estimate_noise_level(y)
+        signal = np.max(y) - np.min(y) if np.max(y) > np.min(y) else 1.0
+        current_snr = signal / (noise + 1e-12)
+        
+        if current_snr > target_snr * 2:
+            return 'none'
+        elif current_snr > target_snr:
+            return 'light'
+        elif current_snr > target_snr / 2:
+            return 'medium'
+        else:
+            return 'strong'
+
+
+class HybridPeakFinder:
+    """
+    Гибридный поиск пиков с использованием трех методов:
+    1. find_peaks (SciPy) с проминенсом
+    2. Вторая производная (Savitzky-Golay)
+    3. Continuous Wavelet Transform (CWT)
+    
+    Комбинирование методов позволяет находить пики, которые пропускает каждый метод по отдельности.
+    """
+    
+    @staticmethod
+    def find_peaks_hybrid(x, y, sensitivity=0.03, min_distance=5, prominence_factor=0.5):
+        """
+        Комбинированный поиск пиков.
+        
+        Parameters:
+        -----------
+        x : array_like
+            Координаты X
+        y : array_like
+            Координаты Y (нормализованные)
+        sensitivity : float
+            Чувствительность (0.001 - 0.1)
+        min_distance : int
+            Минимальное расстояние между пиками в точках
+        prominence_factor : float
+            Множитель для проминенса (относительно sensitivity)
+        
+        Returns:
+        --------
+        peaks : list
+            Список индексов найденных пиков
+        peak_info : list
+            Детальная информация о каждом пике
+        """
+        peaks = set()
+        peak_details = []
+        
+        # Подготовка данных
+        y_smooth = y.copy()
+        x_mean_diff = np.mean(np.diff(x)) if len(x) > 1 else 1.0
+        
+        # Метод 1: find_peaks с проминенсом
+        height_threshold = sensitivity * np.max(y)
+        prominence_threshold = prominence_factor * sensitivity * np.max(y)
+        
+        try:
+            p1, properties = find_peaks(
+                y_smooth, 
+                height=height_threshold,
+                prominence=prominence_threshold,
+                distance=min_distance,
+                width=1
+            )
+            for idx in p1:
+                peaks.add(idx)
+                peak_details.append({
+                    'index': idx,
+                    'method': 'find_peaks',
+                    'height': properties['peak_heights'][np.where(p1 == idx)[0][0]] if idx in p1 else y[idx],
+                    'prominence': properties['prominences'][np.where(p1 == idx)[0][0]] if idx in p1 else 0,
+                    'width': properties['widths'][np.where(p1 == idx)[0][0]] if idx in p1 else 0
+                })
+        except Exception as e:
+            warnings.warn(f"find_peaks failed: {e}")
+        
+        # Метод 2: Вторая производная
+        try:
+            window = min(11, len(y_smooth) // 5 * 2 + 1)
+            if window % 2 == 0:
+                window += 1
+            if window >= 5:
+                d2y = savgol_filter(y_smooth, window, 3, deriv=2, delta=x_mean_diff)
+            else:
+                d2y = np.gradient(np.gradient(y_smooth, x_mean_diff), x_mean_diff)
+            
+            # Ищем отрицательные минимумы второй производной
+            d2y_min = np.min(d2y) if np.min(d2y) < 0 else -1.0
+            threshold = sensitivity * abs(d2y_min)
+            
+            for i in range(2, len(d2y) - 2):
+                if d2y[i] < threshold and d2y[i] < 0:
+                    if d2y[i] < d2y[i-1] and d2y[i] < d2y[i+1]:
+                        # Проверяем, не слишком ли близко к уже найденным пикам
+                        too_close = False
+                        for p in peaks:
+                            if abs(i - p) < min_distance:
+                                too_close = True
+                                break
+                        if not too_close:
+                            peaks.add(i)
+                            peak_details.append({
+                                'index': i,
+                                'method': 'second_derivative',
+                                'height': y[i],
+                                'prominence': 0,
+                                'width': 0
+                            })
+        except Exception as e:
+            warnings.warn(f"Second derivative failed: {e}")
+        
+        # Метод 3: CWT (Continuous Wavelet Transform)
+        try:
+            if len(y_smooth) > 50:
+                widths = np.arange(2, min(15, len(y_smooth) // 10))
+                if len(widths) > 0:
+                    p3 = find_peaks_cwt(y_smooth, widths, min_snr=sensitivity * 2)
+                    for idx in p3:
+                        too_close = False
+                        for p in peaks:
+                            if abs(idx - p) < min_distance:
+                                too_close = True
+                                break
+                        if not too_close:
+                            peaks.add(idx)
+                            peak_details.append({
+                                'index': idx,
+                                'method': 'cwt',
+                                'height': y[idx],
+                                'prominence': 0,
+                                'width': 0
+                            })
+        except Exception as e:
+            warnings.warn(f"CWT failed: {e}")
+        
+        # Сортируем пики
+        peaks_sorted = sorted(peaks)
+        
+        # Дополнительная фильтрация: удаляем пики, которые слишком близки друг к другу
+        filtered_peaks = []
+        for p in peaks_sorted:
+            if not filtered_peaks or abs(x[p] - x[filtered_peaks[-1]]) > min_distance * x_mean_diff:
+                filtered_peaks.append(p)
+        
+        # Обновляем peak_details только для отфильтрованных пиков
+        filtered_details = []
+        for p in filtered_peaks:
+            # Находим соответствующий detail или создаем новый
+            detail = next((d for d in peak_details if d['index'] == p), None)
+            if detail is None:
+                detail = {
+                    'index': p,
+                    'method': 'hybrid',
+                    'height': y[p],
+                    'prominence': 0,
+                    'width': 0
+                }
+            filtered_details.append(detail)
+        
+        return filtered_peaks, filtered_details
+    
+    @staticmethod
+    def estimate_peak_parameters(x, y, peak_indices):
+        """
+        Оценка параметров пиков: амплитуда, центр, ширина.
+        
+        Returns:
+        --------
+        params : list
+            Список параметров [amp, cen, sigma] для каждого пика
+        """
+        params = []
+        for idx in peak_indices:
+            cen = x[idx]
+            amp = y[idx]
+            
+            # Оценка ширины
+            try:
+                widths, _, left_ips, right_ips = peak_widths(y, [idx], rel_height=0.5)
+                if len(widths) > 0:
+                    fwhm = widths[0] * np.mean(np.diff(x))
+                    sigma = fwhm / (2 * np.sqrt(2 * np.log(2)))
+                else:
+                    sigma = (np.max(x) - np.min(x)) / 20
+            except Exception:
+                sigma = (np.max(x) - np.min(x)) / 20
+            
+            sigma = max(sigma, 0.01 * (np.max(x) - np.min(x)) / 20)
+            params.extend([amp, cen, sigma])
+        
+        return params
+
+
+class AICBICController:
+    """
+    Контроль переобучения через AIC (Akaike Information Criterion) и BIC (Bayesian Information Criterion).
+    
+    AIC = n * ln(RSS/n) + 2k
+    BIC = n * ln(RSS/n) + k * ln(n)
+    
+    где:
+    n - число точек
+    RSS - остаточная сумма квадратов
+    k - число параметров модели
+    
+    Пик добавляется только если AIC и BIC улучшаются на заданную величину.
+    """
+    
+    @staticmethod
+    def calculate_aic_bic(n, rss, k):
+        """
+        Расчет AIC и BIC.
+        
+        Parameters:
+        -----------
+        n : int
+            Число точек данных
+        rss : float
+            Остаточная сумма квадратов (Residual Sum of Squares)
+        k : int
+            Число параметров модели
+        
+        Returns:
+        --------
+        aic : float
+            Значение AIC
+        bic : float
+            Значение BIC
+        """
+        if rss <= 0 or n <= 0:
+            return np.inf, np.inf
+        
+        aic = n * np.log(rss / n) + 2 * k
+        bic = n * np.log(rss / n) + k * np.log(n)
+        return aic, bic
+    
+    @staticmethod
+    def should_add_peak(current_aic, new_aic, current_bic, new_bic, threshold=2.0):
+        """
+        Решение о добавлении пика на основе улучшения AIC/BIC.
+        
+        Parameters:
+        -----------
+        current_aic : float
+            Текущее значение AIC
+        new_aic : float
+            Новое значение AIC после добавления пика
+        current_bic : float
+            Текущее значение BIC
+        new_bic : float
+            Новое значение BIC после добавления пика
+        threshold : float
+            Минимальное улучшение для добавления пика
+        
+        Returns:
+        --------
+        should_add : bool
+            True если пик следует добавить
+        improvement_aic : float
+            Улучшение AIC
+        improvement_bic : float
+            Улучшение BIC
+        """
+        improvement_aic = current_aic - new_aic
+        improvement_bic = current_bic - new_bic
+        
+        # Оба критерия должны улучшиться
+        should_add = (improvement_aic > threshold) and (improvement_bic > threshold)
+        
+        return should_add, improvement_aic, improvement_bic
+    
+    @staticmethod
+    def find_optimal_peak_count(x, y, initial_params, max_peaks=20, model_type='gaussian', 
+                                threshold=2.0, method='trf', maxfev=5000):
+        """
+        Поиск оптимального числа пиков с использованием AIC/BIC.
+        
+        Parameters:
+        -----------
+        x : array_like
+            Координаты X
+        y : array_like
+            Координаты Y (нормализованные)
+        initial_params : list
+            Начальные параметры
+        max_peaks : int
+            Максимальное число пиков для проверки
+        model_type : str
+            Тип модели ('gaussian', 'lorentzian', 'pseudo_voigt', 'voigt')
+        threshold : float
+            Порог улучшения AIC/BIC
+        method : str
+            Метод оптимизации
+        maxfev : int
+            Максимальное число итераций
+        
+        Returns:
+        --------
+        optimal_params : list
+            Оптимальные параметры
+        optimal_n_peaks : int
+            Оптимальное число пиков
+        aic_history : list
+            История AIC
+        bic_history : list
+            История BIC
+        """
+        n = len(y)
+        aic_history = []
+        bic_history = []
+        peak_count_history = []
+        
+        # Начинаем с 1 пика
+        current_n_peaks = 1
+        current_params = initial_params[:3]
+        
+        # Выполняем фиттинг для текущего числа пиков
+        from scipy.optimize import curve_fit
+        
+        def model_func(x, *params):
+            if model_type == 'gaussian':
+                return GaussianModel.multi_gaussian(x, *params)
+            elif model_type == 'lorentzian':
+                return GaussianModel.multi_lorentzian(x, *params)
+            elif model_type == 'pseudo_voigt':
+                return GaussianModel.multi_pseudo_voigt(x, *params)
+            else:  # voigt
+                return GaussianModel.multi_voigt(x, *params)
+        
+        try:
+            popt, _ = curve_fit(model_func, x, y, p0=current_params, method=method, maxfev=maxfev)
+            y_fit = model_func(x, *popt)
+            rss = np.sum((y - y_fit) ** 2)
+            k = len(popt)
+            aic, bic = AICBICController.calculate_aic_bic(n, rss, k)
+            aic_history.append(aic)
+            bic_history.append(bic)
+            peak_count_history.append(current_n_peaks)
+        except Exception:
+            return initial_params, 1, [], []
+        
+        # Пробуем добавлять пики
+        for n_peaks in range(2, max_peaks + 1):
+            # Добавляем новый пик (берем из начальных параметров если есть)
+            if n_peaks * 3 <= len(initial_params):
+                # Используем существующие параметры
+                new_params = initial_params[:n_peaks * 3]
+            else:
+                # Добавляем случайный пик
+                new_params = list(current_params)
+                new_cen = np.mean(x) + np.random.randn() * 0.1 * (np.max(x) - np.min(x))
+                new_amp = 0.1 * np.max(y)
+                new_sigma = 0.05 * (np.max(x) - np.min(x))
+                new_params.extend([new_amp, new_cen, new_sigma])
+            
+            try:
+                popt, _ = curve_fit(model_func, x, y, p0=new_params, method=method, maxfev=maxfev)
+                y_fit = model_func(x, *popt)
+                rss = np.sum((y - y_fit) ** 2)
+                k = len(popt)
+                new_aic, new_bic = AICBICController.calculate_aic_bic(n, rss, k)
+                
+                should_add, imp_aic, imp_bic = AICBICController.should_add_peak(
+                    aic_history[-1], new_aic, bic_history[-1], new_bic, threshold
+                )
+                
+                if should_add:
+                    current_params = popt
+                    current_n_peaks = n_peaks
+                    aic_history.append(new_aic)
+                    bic_history.append(new_bic)
+                    peak_count_history.append(n_peaks)
+                else:
+                    # Не улучшается - останавливаемся
+                    break
+                    
+            except Exception:
+                # Ошибка фиттинга - останавливаемся
+                break
+        
+        return current_params, current_n_peaks, aic_history, bic_history, peak_count_history
+
+
+class ResidualsAnalyzer:
+    """
+    Анализ остатков для обнаружения пропущенных пиков.
+    
+    После фиттинга анализируются остатки (разница между данными и моделью).
+    Если в остатках видны структуры, похожие на пики, они предлагаются для добавления.
+    """
+    
+    @staticmethod
+    def find_peaks_in_residuals(x, residuals, sensitivity=0.02, min_distance=5):
+        """
+        Поиск пиков в остатках.
+        
+        Parameters:
+        -----------
+        x : array_like
+            Координаты X
+        residuals : array_like
+            Остатки (y_data - y_fit)
+        sensitivity : float
+            Чувствительность
+        min_distance : int
+            Минимальное расстояние между пиками в точках
+        
+        Returns:
+        --------
+        peaks : list
+            Список индексов найденных пиков
+        peak_info : list
+            Информация о найденных пиках
+        """
+        # Сглаживаем остатки для уменьшения шума
+        window = min(11, len(residuals) // 5 * 2 + 1)
+        if window % 2 == 0:
+            window += 1
+        
+        if window >= 5 and len(residuals) >= window:
+            residuals_smooth = savgol_filter(residuals, window, 3)
+        else:
+            residuals_smooth = residuals
+        
+        # Ищем положительные пики (модель ниже данных)
+        height_threshold = sensitivity * np.max(np.abs(residuals))
+        
+        positive_peaks = []
+        negative_peaks = []
+        
+        try:
+            pos_peaks, _ = find_peaks(residuals_smooth, height=height_threshold, distance=min_distance)
+            positive_peaks = list(pos_peaks)
+        except Exception:
+            pass
+        
+        try:
+            neg_peaks, _ = find_peaks(-residuals_smooth, height=height_threshold, distance=min_distance)
+            negative_peaks = list(neg_peaks)
+        except Exception:
+            pass
+        
+        # Объединяем и фильтруем
+        all_peaks = sorted(set(positive_peaks) | set(negative_peaks))
+        
+        # Фильтруем близкие пики
+        filtered_peaks = []
+        for p in all_peaks:
+            if not filtered_peaks or abs(x[p] - x[filtered_peaks[-1]]) > min_distance * np.mean(np.diff(x)):
+                filtered_peaks.append(p)
+        
+        # Собираем информацию о пиках
+        peak_info = []
+        for idx in filtered_peaks:
+            peak_info.append({
+                'index': idx,
+                'x': x[idx],
+                'residual_value': residuals[idx],
+                'amplitude_estimate': abs(residuals[idx]),
+                'sign': 'positive' if residuals[idx] > 0 else 'negative'
+            })
+        
+        return filtered_peaks, peak_info
+    
+    @staticmethod
+    def suggest_peaks_from_residuals(x, residuals, peak_info, sensitivity=0.02, min_distance=5):
+        """
+        Предлагает пики из остатков для добавления.
+        
+        Returns:
+        --------
+        suggested_peaks : list
+            Список предлагаемых пиков с параметрами
+        """
+        peaks, info = ResidualsAnalyzer.find_peaks_in_residuals(
+            x, residuals, sensitivity, min_distance
+        )
+        
+        suggested = []
+        for idx in peaks:
+            # Оцениваем параметры пика
+            cen = x[idx]
+            amp = abs(residuals[idx])
+            
+            # Оцениваем ширину
+            try:
+                widths, _, _, _ = peak_widths(residuals, [idx], rel_height=0.5)
+                if len(widths) > 0:
+                    fwhm = widths[0] * np.mean(np.diff(x))
+                    sigma = fwhm / (2 * np.sqrt(2 * np.log(2)))
+                else:
+                    sigma = (np.max(x) - np.min(x)) / 20
+            except Exception:
+                sigma = (np.max(x) - np.min(x)) / 20
+            
+            sigma = max(sigma, 0.01 * (np.max(x) - np.min(x)) / 20)
+            
+            suggested.append({
+                'index': idx,
+                'cen': cen,
+                'amp': amp,
+                'sigma': sigma,
+                'sign': 'positive' if residuals[idx] > 0 else 'negative'
+            })
+        
+        return suggested
+
+
+class VoigtFitter:
+    """
+    Полноценный Voigt профиль (свертка Гаусса и Лоренца).
+    Использует scipy.special.voigt_profile для точного расчета.
+    """
+    
+    @staticmethod
+    def voigt(x, amp, cen, sigma, gamma):
+        """
+        Voigt профиль.
+        
+        Parameters:
+        -----------
+        x : array_like
+            Координаты
+        amp : float
+            Амплитуда
+        cen : float
+            Центр
+        sigma : float
+            Ширина Гаусса
+        gamma : float
+            Ширина Лоренца
+        
+        Returns:
+        --------
+        y : array_like
+            Значения Voigt профиля
+        """
+        return amp * voigt_profile(x - cen, sigma, gamma)
+    
+    @staticmethod
+    def multi_voigt(x, *params):
+        """
+        Сумма Voigt пиков.
+        
+        Parameters:
+        -----------
+        x : array_like
+            Координаты
+        params : list
+            Параметры [amp1, cen1, sigma1, gamma1, amp2, cen2, sigma2, gamma2, ...]
+        
+        Returns:
+        --------
+        y : array_like
+            Сумма Voigt профилей
+        """
+        n = len(params) // 4
+        y = np.zeros_like(x, dtype=float)
+        for i in range(n):
+            amp = params[4*i]
+            cen = params[4*i + 1]
+            sigma = abs(params[4*i + 2])
+            gamma = abs(params[4*i + 3])
+            y += VoigtFitter.voigt(x, amp, cen, sigma, gamma)
+        return y
+    
+    @staticmethod
+    def estimate_voigt_parameters(x, y, peak_idx):
+        """
+        Оценка параметров Voigt для пика.
+        
+        Returns:
+        --------
+        sigma_guess : float
+            Начальное приближение sigma
+        gamma_guess : float
+            Начальное приближение gamma
+        """
+        # Оцениваем общую ширину
+        try:
+            widths, _, _, _ = peak_widths(y, [peak_idx], rel_height=0.5)
+            if len(widths) > 0:
+                fwhm = widths[0] * np.mean(np.diff(x))
+                # Для Voigt: FWHM ~ sigma * 2.355 + gamma * 2
+                sigma_guess = fwhm / 4.0
+                gamma_guess = fwhm / 6.0
+            else:
+                sigma_guess = (np.max(x) - np.min(x)) / 20
+                gamma_guess = (np.max(x) - np.min(x)) / 30
+        except Exception:
+            sigma_guess = (np.max(x) - np.min(x)) / 20
+            gamma_guess = (np.max(x) - np.min(x)) / 30
+        
+        return max(sigma_guess, 0.01), max(gamma_guess, 0.005)
+
+
+# ==================== EXISTING CLASSES WITH IMPROVEMENTS ====================
 
 class DataParser:
     """Universal parser for spectral data"""
@@ -201,13 +954,15 @@ class DataParser:
 
 
 class DataPreprocessor:
-    """Handles data preprocessing including clipping and log transformations"""
+    """Handles data preprocessing including clipping, log transformations, and baseline correction"""
     
     def __init__(self, clip_negative=True, show_warnings=True):
         self.clip_negative = clip_negative
         self.show_warnings = show_warnings
         self.clipped_points = 0
         self.small_values_warning = False
+        self.baseline_removed = False
+        self.baseline_values = None
     
     def smooth_data(self, x, y, method='savgol', level='none', x_log=False):
         """Smooth data with various methods and levels"""
@@ -223,14 +978,8 @@ class DataPreprocessor:
         elif level == 'strong':
             window = min(21, n_points - 1 if n_points % 2 == 0 else n_points)
         elif level == 'adaptive':
-            # Adaptive smoothing: larger window for noisier regions
-            noise_estimate = np.std(np.diff(y)) / np.mean(np.abs(y)) if np.mean(np.abs(y)) > 0 else 1
-            if noise_estimate > 0.5:
-                window = min(21, n_points - 1 if n_points % 2 == 0 else n_points)
-            elif noise_estimate > 0.2:
-                window = min(11, n_points - 1 if n_points % 2 == 0 else n_points)
-            else:
-                window = min(5, n_points - 1 if n_points % 2 == 0 else n_points)
+            # Адаптивное сглаживание
+            return AdaptiveSmoother.adaptive_savgol(y, base_window=5)
         else:
             return y
         
@@ -250,7 +999,120 @@ class DataPreprocessor:
                 warnings.warn(f"Smoothing failed: {e}")
             return y
     
-    def preprocess_for_fitting(self, x_linear, y_original, use_log_x, use_log_y, smoothing_level='none'):
+    def remove_baseline_arpls(self, y, lam=1e5, p=0.01, niter=10):
+        """
+        Asymmetric Least Squares (arPLS) baseline correction.
+        Золотой стандарт для коррекции фона в рамановских спектрах.
+        
+        Parameters:
+        -----------
+        y : array_like
+            Входные данные
+        lam : float
+            Параметр гладкости (чем больше, тем более гладкий фон)
+        p : float
+            Параметр асимметрии (0.001-0.1, типично 0.01)
+        niter : int
+            Число итераций
+        
+        Returns:
+        --------
+        baseline : array_like
+            Оценка фона
+        """
+        y = np.asarray(y, dtype=float)
+        n = len(y)
+        
+        # Если данные слишком короткие, используем простой метод
+        if n < 10:
+            return np.percentile(y, 5) * np.ones_like(y)
+        
+        # Используем pybaselines если доступен
+        if HAS_PYBASELINES:
+            try:
+                baseline_fitter = Baseline(x_data=None)
+                # Используем arPLS метод из pybaselines
+                baseline, params = baseline_fitter.arpls(y, lam=lam, p=p, max_iter=niter)
+                return baseline
+            except Exception as e:
+                if self.show_warnings:
+                    warnings.warn(f"pybaselines.arpls failed: {e}, falling back to manual implementation")
+        
+        # Ручная реализация arPLS
+        try:
+            # Построение матрицы второй производной
+            from scipy.sparse import spdiags, diags, csr_matrix
+            from scipy.sparse.linalg import spsolve
+            
+            # Создаем матрицу D (вторая производная)
+            D = diags([1, -2, 1], [0, 1, 2], shape=(n-2, n)).toarray()
+            
+            # Итеративный процесс
+            z = y.copy()
+            for i in range(niter):
+                # Веса: больший вес для точек ниже фона
+                w = np.ones_like(y)
+                w[y > z] = p
+                w[y <= z] = 1 - p
+                
+                # Решаем систему (W + lam * D.T @ D) z = W @ y
+                W = np.diag(w)
+                A = W + lam * (D.T @ D)
+                try:
+                    z = np.linalg.solve(A, W @ y)
+                except np.linalg.LinAlgError:
+                    # Если матрица сингулярна, используем псевдо-обратную
+                    z = np.linalg.lstsq(A, W @ y, rcond=None)[0]
+            
+            return z
+            
+        except Exception as e:
+            if self.show_warnings:
+                warnings.warn(f"arPLS manual implementation failed: {e}")
+            # Fallback: простая медианная фильтрация
+            window = min(21, n // 10 * 2 + 1)
+            if window % 2 == 0:
+                window += 1
+            from scipy.ndimage import median_filter
+            return median_filter(y, size=window)
+    
+    def remove_baseline_polynomial(self, x, y, degree=1):
+        """Полиномиальная коррекция фона"""
+        if degree < 0:
+            return y, np.zeros_like(y)
+        
+        # Подгоняем полином
+        coeffs = np.polyfit(x, y, degree)
+        baseline = np.polyval(coeffs, x)
+        return y - baseline, baseline
+    
+    def remove_baseline(self, x, y, method='arpls', degree=1, lam=1e5, p=0.01, niter=10):
+        """
+        Коррекция фона выбранным методом.
+        
+        Methods:
+        --------
+        'none' : Без коррекции
+        'polynomial' : Полиномиальная коррекция
+        'arpls' : Asymmetric Least Squares
+        'constant' : Постоянный фон (медиана)
+        """
+        if method == 'none':
+            return y, np.zeros_like(y)
+        elif method == 'polynomial':
+            return self.remove_baseline_polynomial(x, y, degree)
+        elif method == 'arpls':
+            baseline = self.remove_baseline_arpls(y, lam, p, niter)
+            return y - baseline, baseline
+        elif method == 'constant':
+            baseline = np.median(y) * np.ones_like(y)
+            return y - baseline, baseline
+        else:
+            return y, np.zeros_like(y)
+    
+    def preprocess_for_fitting(self, x_linear, y_original, use_log_x, use_log_y, smoothing_level='none',
+                               baseline_method='arpls', baseline_lam=1e5, baseline_p=0.01, 
+                               baseline_degree=1, baseline_niter=10):
         """Preprocess data for fitting with proper handling of edge cases"""
         # Sort by X to ensure monotonic increasing X
         sort_idx = np.argsort(x_linear)
@@ -267,12 +1129,25 @@ class DataPreprocessor:
         else:
             y_for_fitting = y_sorted
         
+        # Коррекция фона
+        if baseline_method != 'none':
+            y_corrected, baseline = self.remove_baseline(
+                x_sorted, y_for_fitting, baseline_method, 
+                baseline_degree, baseline_lam, baseline_p, baseline_niter
+            )
+            self.baseline_removed = True
+            self.baseline_values = baseline
+            y_for_fitting = y_corrected
+        else:
+            self.baseline_removed = False
+            self.baseline_values = None
+        
         # Apply smoothing if requested
         if smoothing_level != 'none':
             y_for_fitting = self.smooth_data(x_sorted, y_for_fitting, 'savgol', smoothing_level, use_log_x)
         
         # Small epsilon for log transformations
-        eps = np.finfo(float).eps  # Use machine epsilon instead of 1e-12
+        eps = np.finfo(float).eps
         
         # Check for very small values when using log
         if use_log_y and np.any(y_for_fitting < eps * 100):
@@ -306,7 +1181,9 @@ class DataPreprocessor:
             'x_label': x_label,
             'y_label': y_label,
             'clipped_points': self.clipped_points,
-            'small_values_warning': self.small_values_warning
+            'small_values_warning': self.small_values_warning,
+            'baseline_removed': self.baseline_removed,
+            'baseline_values': self.baseline_values
         }
 
 
@@ -349,15 +1226,77 @@ class DerivativeAnalyzer:
                     if y[i] > threshold * np.max(y):
                         peaks.append(i)
         return peaks
+    
+    @staticmethod
+    def find_peaks_by_second_derivative(x, y, sensitivity=0.01, min_distance=5):
+        """
+        Поиск пиков по отрицательным минимумам второй производной.
+        Этот метод особенно хорош для обнаружения скрытых пиков.
+        """
+        # Сглаживаем для уменьшения шума
+        window = min(11, len(y) // 4 * 2 + 1)
+        if window % 2 == 0:
+            window += 1
+        
+        if window >= 5 and len(y) >= window:
+            y_smooth = savgol_filter(y, window, 3)
+        else:
+            y_smooth = y
+        
+        # Вторая производная через Savitzky-Golay
+        try:
+            x_mean_diff = np.mean(np.diff(x)) if len(x) > 1 else 1.0
+            d2y = savgol_filter(y_smooth, window, 3, deriv=2, delta=x_mean_diff)
+        except Exception:
+            d2y = np.gradient(np.gradient(y_smooth, x), x)
+        
+        # Ищем отрицательные минимумы (пики)
+        d2y_min = np.min(d2y) if np.min(d2y) < 0 else -1.0
+        threshold = sensitivity * abs(d2y_min)
+        
+        peaks = []
+        for i in range(2, len(d2y) - 2):
+            if d2y[i] < threshold and d2y[i] < 0:
+                if d2y[i] < d2y[i-1] and d2y[i] < d2y[i+1]:
+                    # Проверяем расстояние до предыдущих пиков
+                    if not peaks or abs(x[i] - x[peaks[-1]]) > min_distance * np.mean(np.diff(x)):
+                        peaks.append(i)
+        
+        return peaks
 
 
 class GaussianModel:
-    """Model for sum of Gaussians with baseline correction"""
+    """Model for sum of Gaussians with baseline correction and additional peak shapes"""
     
     @staticmethod
     def gaussian(x, amp, cen, sigma):
         """Gaussian function with safe sigma"""
         return amp * np.exp(-(x - cen)**2 / (2 * max(sigma, np.finfo(float).eps)**2))
+    
+    @staticmethod
+    def lorentzian(x, amp, cen, gamma):
+        """Lorentzian function (natural line shape)"""
+        return amp * (gamma**2) / ((x - cen)**2 + gamma**2 + np.finfo(float).eps)
+    
+    @staticmethod
+    def pseudo_voigt(x, amp, cen, sigma, eta=0.5):
+        """
+        Pseudo-Voigt: линейная комбинация Гаусса и Лоренца.
+        
+        eta = 0 : чистый Гаусс
+        eta = 1 : чистый Лоренц
+        0 < eta < 1 : смесь
+        """
+        gauss = GaussianModel.gaussian(x, amp, cen, sigma)
+        # Для Лоренца используем gamma = sigma * 1.7 (приближенное соотношение)
+        gamma = sigma * 1.7
+        lorentz = GaussianModel.lorentzian(x, amp, cen, gamma)
+        return eta * lorentz + (1 - eta) * gauss
+    
+    @staticmethod
+    def voigt(x, amp, cen, sigma, gamma):
+        """Voigt profile using scipy.special.voigt_profile"""
+        return amp * voigt_profile(x - cen, sigma, gamma)
     
     @staticmethod
     def multi_gaussian(x, *params):
@@ -369,6 +1308,44 @@ class GaussianModel:
             cen = params[3*i + 1]
             sigma = abs(params[3*i + 2])
             y += GaussianModel.gaussian(x, amp, cen, sigma)
+        return y
+    
+    @staticmethod
+    def multi_lorentzian(x, *params):
+        """Sum of multiple Lorentzians"""
+        n = len(params) // 3
+        y = np.zeros_like(x, dtype=float)
+        for i in range(n):
+            amp = params[3*i]
+            cen = params[3*i + 1]
+            gamma = abs(params[3*i + 2])
+            y += GaussianModel.lorentzian(x, amp, cen, gamma)
+        return y
+    
+    @staticmethod
+    def multi_pseudo_voigt(x, *params):
+        """Sum of multiple Pseudo-Voigt peaks"""
+        n = len(params) // 4  # amp, cen, sigma, eta
+        y = np.zeros_like(x, dtype=float)
+        for i in range(n):
+            amp = params[4*i]
+            cen = params[4*i + 1]
+            sigma = abs(params[4*i + 2])
+            eta = np.clip(params[4*i + 3], 0, 1)
+            y += GaussianModel.pseudo_voigt(x, amp, cen, sigma, eta)
+        return y
+    
+    @staticmethod
+    def multi_voigt(x, *params):
+        """Sum of multiple Voigt peaks"""
+        n = len(params) // 4
+        y = np.zeros_like(x, dtype=float)
+        for i in range(n):
+            amp = params[4*i]
+            cen = params[4*i + 1]
+            sigma = abs(params[4*i + 2])
+            gamma = abs(params[4*i + 3])
+            y += GaussianModel.voigt(x, amp, cen, sigma, gamma)
         return y
     
     @staticmethod
@@ -415,14 +1392,40 @@ class GaussianModel:
         )
     
     @staticmethod
-    def calculate_area(amp, sigma):
-        """Area under Gaussian"""
-        return amp * sigma * np.sqrt(2 * np.pi)
+    def calculate_area(amp, sigma, model_type='gaussian', eta=0.5):
+        """Calculate area under peak for different models"""
+        if model_type == 'gaussian':
+            return amp * sigma * np.sqrt(2 * np.pi)
+        elif model_type == 'lorentzian':
+            return amp * np.pi * sigma  # gamma = sigma * 1.7, площадь = pi * amp * gamma
+        elif model_type == 'pseudo_voigt':
+            # Взвешенная сумма площадей Гаусса и Лоренца
+            area_gauss = amp * sigma * np.sqrt(2 * np.pi)
+            area_lorentz = amp * np.pi * sigma * 1.7
+            return eta * area_lorentz + (1 - eta) * area_gauss
+        else:  # voigt
+            # Приближенная площадь для Voigt
+            return amp * sigma * np.sqrt(2 * np.pi) * 1.2  # Приближение
+        return amp * sigma * np.sqrt(2 * np.pi)  # Fallback
     
     @staticmethod
-    def calculate_fwhm(sigma):
-        """Full width at half maximum"""
-        return 2 * np.sqrt(2 * np.log(2)) * sigma
+    def calculate_fwhm(sigma, model_type='gaussian', eta=0.5):
+        """Calculate FWHM for different models"""
+        if model_type == 'gaussian':
+            return 2 * np.sqrt(2 * np.log(2)) * sigma
+        elif model_type == 'lorentzian':
+            return 2 * sigma  # gamma = sigma * 1.7, FWHM = 2 * gamma
+        elif model_type == 'pseudo_voigt':
+            # Приближенный FWHM для Pseudo-Voigt
+            fwhm_gauss = 2 * np.sqrt(2 * np.log(2)) * sigma
+            fwhm_lorentz = 2 * sigma * 1.7
+            return eta * fwhm_lorentz + (1 - eta) * fwhm_gauss
+        else:  # voigt
+            # Приближенный FWHM для Voigt
+            fwhm_gauss = 2 * np.sqrt(2 * np.log(2)) * sigma
+            fwhm_lorentz = 2 * sigma  # gamma = sigma
+            return np.sqrt(fwhm_gauss**2 + fwhm_lorentz**2)  # Приближение
+        return 2 * np.sqrt(2 * np.log(2)) * sigma  # Fallback
     
     @staticmethod
     def estimate_sigma_from_peak(x, y, peak_idx):
@@ -455,14 +1458,33 @@ class GaussianModel:
             width = (right_min - left_min) * np.mean(np.diff(x))
             sigma = width / 3.0
             return max(sigma, 0.01 * (np.max(x) - np.min(x)) / 10)
+    
+    @staticmethod
+    def estimate_eta_from_peak(x, y, peak_idx):
+        """Оценка параметра eta для Pseudo-Voigt"""
+        # По соотношению высоты и ширины оцениваем форму
+        try:
+            heights = y[peak_idx]
+            widths, _, _, _ = peak_widths(y, [peak_idx], rel_height=0.5)
+            if len(widths) > 0:
+                fwhm = widths[0] * np.mean(np.diff(x))
+                # Если пик острый и с широкими крыльями -> ближе к Лоренцу
+                # Если пик более пологий -> ближе к Гауссу
+                ratio = fwhm / (heights + 1e-12)
+                # Эмпирическое соотношение
+                eta = np.clip(1.0 - ratio / 10.0, 0, 1)
+                return eta
+        except Exception:
+            pass
+        return 0.5  # По умолчанию 50/50
 
 
 class FitQualityAnalyzer:
-    """Fit quality analysis"""
+    """Fit quality analysis with AIC and BIC"""
     
     @staticmethod
     def calculate_metrics(y_true, y_pred, n_params):
-        """Calculate quality metrics"""
+        """Calculate quality metrics including AIC and BIC"""
         residuals = y_true - y_pred
         n = len(y_true)
         
@@ -471,19 +1493,20 @@ class FitQualityAnalyzer:
         ss_tot = np.sum((y_true - np.mean(y_true))**2)
         r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
         
-        # AIC and BIC
-        rss = ss_res
-        aic = n * np.log(rss/n) + 2 * n_params if rss > 0 else -np.inf
-        bic = n * np.log(rss/n) + n_params * np.log(n) if rss > 0 else -np.inf
+        # AIC and BIC using AICBICController
+        aic, bic = AICBICController.calculate_aic_bic(n, ss_res, n_params)
         
         # Chi-squared (reduced)
-        chi_squared = rss / (n - n_params) if n > n_params else np.inf
+        chi_squared = ss_res / (n - n_params) if n > n_params else np.inf
         
         # Maximum error
         max_error = np.max(np.abs(residuals))
         
         # Root mean square error
         rmse = np.sqrt(np.mean(residuals**2))
+        
+        # Mean absolute error
+        mae = np.mean(np.abs(residuals))
         
         return {
             'R²': r_squared,
@@ -492,18 +1515,25 @@ class FitQualityAnalyzer:
             'χ²': chi_squared,
             'Max Error': max_error,
             'RMSE': rmse,
-            'Residuals': residuals
+            'MAE': mae,
+            'Residuals': residuals,
+            'n_params': n_params,
+            'n_points': n,
+            'SS_res': ss_res,
+            'SS_tot': ss_tot
         }
     
     @staticmethod
     def detect_autocorrelation(residuals):
-        """Detect autocorrelation in residuals"""
+        """Detect autocorrelation in residuals using Durbin-Watson statistic"""
         if len(residuals) < 10:
             return False
         
         diff = np.diff(residuals)
-        dw = np.sum(diff**2) / np.sum(residuals**2)
+        dw = np.sum(diff**2) / (np.sum(residuals**2) + 1e-12)
         
+        # DW < 1.5: положительная автокорреляция (пропущены пики)
+        # DW > 2.5: отрицательная автокорреляция (переобучение)
         return dw < 1.5 or dw > 2.5
 
 
@@ -511,14 +1541,21 @@ class GaussianFitter:
     """Handles Gaussian fitting with multiple optimization methods and baseline"""
     
     def __init__(self, method='trf', max_nfev=5000, baseline_method='none', 
-                 fit_quality='balanced', last_popt=None):
+                 fit_quality='balanced', last_popt=None, model_type='gaussian',
+                 use_aic_bic_control=False, aic_bic_threshold=2.0):
         self.method = method
         self.max_nfev = max_nfev
         self.baseline_method = baseline_method
         self.fit_quality = fit_quality
         self.last_popt = last_popt
+        self.model_type = model_type
+        self.use_aic_bic_control = use_aic_bic_control
+        self.aic_bic_threshold = aic_bic_threshold
         self.convergence_history = []
         self.fit_progress = 0
+        self.aic_history = []
+        self.bic_history = []
+        self.peak_count_history = []
         
         # Set tolerances based on quality
         if fit_quality == 'fast':
@@ -543,41 +1580,57 @@ class GaussianFitter:
             'quadratic': 3
         }.get(self.baseline_method, 0)
     
+    def get_model_func(self, n_peaks):
+        """Get the appropriate model function based on model_type"""
+        if self.model_type == 'gaussian':
+            return lambda x, *p: GaussianModel.multi_gaussian(x, *p)
+        elif self.model_type == 'lorentzian':
+            return lambda x, *p: GaussianModel.multi_lorentzian(x, *p)
+        elif self.model_type == 'pseudo_voigt':
+            return lambda x, *p: GaussianModel.multi_pseudo_voigt(x, *p)
+        elif self.model_type == 'voigt':
+            return lambda x, *p: GaussianModel.multi_voigt(x, *p)
+        else:
+            return lambda x, *p: GaussianModel.multi_gaussian(x, *p)
+    
+    def get_params_per_peak(self):
+        """Get number of parameters per peak for current model"""
+        if self.model_type in ['gaussian', 'lorentzian']:
+            return 3  # amp, cen, sigma/gamma
+        else:  # pseudo_voigt, voigt
+            return 4  # amp, cen, sigma, eta/gamma
+    
     def fit(self, x, y_norm, initial_peak_params, y_max, 
             progress_callback=None, fixed_params=None):
         """Perform fitting with progress tracking"""
-        n_peaks = len(initial_peak_params) // 3
+        n_peaks = len(initial_peak_params) // self.get_params_per_peak()
         n_baseline = self.get_n_baseline_params()
         
-        # Use last good parameters if available (but keep same structure)
+        # Use last good parameters if available
         if self.last_popt is not None:
-            # Check if structure matches (same number of peaks and baseline)
-            expected_len = n_peaks * 3 + n_baseline
+            expected_len = n_peaks * self.get_params_per_peak() + n_baseline
             if len(self.last_popt) == expected_len:
                 initial_params = self.last_popt.copy()
                 if progress_callback:
                     progress_callback(0.1, "Using cached parameters...")
             else:
-                # Structure changed, use initial
                 initial_params = np.array(initial_peak_params)
                 if n_baseline > 0:
-                    # Add initial baseline estimates
                     if self.baseline_method == 'constant':
-                        baseline_init = [np.percentile(y_norm, 5)]  # 5th percentile as baseline
+                        baseline_init = [np.percentile(y_norm, 5)]
                     elif self.baseline_method == 'linear':
                         baseline_init = [np.percentile(y_norm, 5), 0]
-                    else:  # quadratic
+                    else:
                         baseline_init = [np.percentile(y_norm, 5), 0, 0]
                     initial_params = np.concatenate([initial_params, baseline_init])
         else:
             initial_params = np.array(initial_peak_params)
             if n_baseline > 0:
-                # Add initial baseline estimates
                 if self.baseline_method == 'constant':
                     baseline_init = [np.percentile(y_norm, 5)]
                 elif self.baseline_method == 'linear':
                     baseline_init = [np.percentile(y_norm, 5), 0]
-                else:  # quadratic
+                else:
                     baseline_init = [np.percentile(y_norm, 5), 0, 0]
                 initial_params = np.concatenate([initial_params, baseline_init])
         
@@ -593,15 +1646,12 @@ class GaussianFitter:
         
         try:
             if progress_callback:
-                progress_callback(0.3, "Initializing fit...")
+                progress_callback(0.3, f"Initializing {self.model_type} fit...")
             
-            # Create the model function with correct number of parameters
-            def model_func(x, *params):
-                return GaussianModel.multi_gaussian_with_baseline_flat(
-                    x, *params, n_peaks=n_peaks, baseline_method=self.baseline_method
-                )
+            # Get the model function
+            model_func = self.get_model_func(n_peaks)
             
-            # Perform fit with selected method and tolerances
+            # Perform fit
             popt, pcov = curve_fit(
                 model_func,
                 x,
@@ -621,23 +1671,43 @@ class GaussianFitter:
             fit_y_norm = model_func(x, *popt)
             
             # Extract peak parameters
-            peak_params = popt[:n_peaks*3]
-            baseline_params = popt[n_peaks*3:] if n_baseline > 0 else []
+            params_per_peak = self.get_params_per_peak()
+            peak_params = popt[:n_peaks * params_per_peak]
+            baseline_params = popt[n_peaks * params_per_peak:] if n_baseline > 0 else []
             
             # Extract components
             components = []
             for i in range(n_peaks):
-                amp_norm = peak_params[3*i]
-                cen = peak_params[3*i + 1]
-                sigma = abs(peak_params[3*i + 2])
+                base_idx = i * params_per_peak
+                amp_norm = peak_params[base_idx]
+                cen = peak_params[base_idx + 1]
+                sigma = abs(peak_params[base_idx + 2])
                 
                 amp = amp_norm * y_max
-                area = GaussianModel.calculate_area(amp_norm, sigma) * y_max
                 
-                component_y_norm = GaussianModel.gaussian(x, amp_norm, cen, sigma)
+                # Get eta for pseudo_voigt or gamma for voigt
+                eta = 0.5
+                gamma = sigma * 0.5
+                if params_per_peak == 4:
+                    eta = np.clip(peak_params[base_idx + 3], 0, 1) if self.model_type == 'pseudo_voigt' else 0.5
+                    gamma = abs(peak_params[base_idx + 3]) if self.model_type == 'voigt' else sigma * 0.5
+                
+                # Calculate area and FWHM
+                area = GaussianModel.calculate_area(amp_norm, sigma, self.model_type, eta) * y_max
+                fwhm = GaussianModel.calculate_fwhm(sigma, self.model_type, eta)
+                
+                # Generate component curve
+                if self.model_type == 'gaussian':
+                    component_y_norm = GaussianModel.gaussian(x, amp_norm, cen, sigma)
+                elif self.model_type == 'lorentzian':
+                    component_y_norm = GaussianModel.lorentzian(x, amp_norm, cen, sigma)
+                elif self.model_type == 'pseudo_voigt':
+                    component_y_norm = GaussianModel.pseudo_voigt(x, amp_norm, cen, sigma, eta)
+                else:  # voigt
+                    component_y_norm = GaussianModel.voigt(x, amp_norm, cen, sigma, gamma)
                 
                 # Calculate center in linear space
-                if hasattr(x, 'min') and hasattr(x, 'max'):  # Simple check
+                if hasattr(x, 'min') and hasattr(x, 'max'):
                     cen_linear = 10**cen if np.any(x < 0) else cen
                 else:
                     cen_linear = cen
@@ -649,10 +1719,13 @@ class GaussianFitter:
                     'cen_log': cen,
                     'cen_linear': cen_linear,
                     'sigma_log': sigma,
-                    'fwhm': GaussianModel.calculate_fwhm(sigma),
+                    'fwhm': fwhm,
                     'area': area,
                     'fraction': 0,
-                    'y_norm': component_y_norm
+                    'y_norm': component_y_norm,
+                    'eta': eta,
+                    'gamma': gamma,
+                    'model_type': self.model_type
                 })
             
             # Calculate fractions
@@ -660,6 +1733,26 @@ class GaussianFitter:
             for c in components:
                 c['fraction'] = c['area'] / total_area if total_area > 0 else 0
                 c['fraction_percent'] = c['fraction'] * 100
+            
+            # Apply AIC/BIC control if enabled
+            if self.use_aic_bic_control and len(components) > 1:
+                if progress_callback:
+                    progress_callback(0.85, "Evaluating AIC/BIC...")
+                
+                # Calculate metrics for current fit
+                n_points = len(x)
+                rss = np.sum((y_norm - fit_y_norm) ** 2)
+                k = len(popt)
+                aic, bic = AICBICController.calculate_aic_bic(n_points, rss, k)
+                
+                self.aic_history.append(aic)
+                self.bic_history.append(bic)
+                self.peak_count_history.append(len(components))
+                
+                # Store for future reference
+                self._last_aic = aic
+                self._last_bic = bic
+                self._last_n_peaks = len(components)
             
             if progress_callback:
                 progress_callback(1.0, "Fit complete!")
@@ -678,10 +1771,32 @@ class GaussianFitter:
         x_range = np.max(x) - np.min(x)
         y_range = np.max(y_norm) - np.min(y_norm)
         
+        params_per_peak = self.get_params_per_peak()
+        
         # Peak bounds
         for i in range(n_peaks):
-            lower_bounds.extend([0, np.min(x), x_range * 0.001])
-            upper_bounds.extend([2 * np.max(y_norm), np.max(x), x_range * 0.5])
+            # amp: 0 to 2*max
+            lower_bounds.append(0)
+            upper_bounds.append(2 * np.max(y_norm))
+            
+            # cen: within data range
+            lower_bounds.append(np.min(x))
+            upper_bounds.append(np.max(x))
+            
+            # sigma/gamma: positive, within reasonable range
+            lower_bounds.append(x_range * 0.001)
+            upper_bounds.append(x_range * 0.5)
+            
+            # Additional parameters for pseudo_voigt or voigt
+            if params_per_peak == 4:
+                if self.model_type == 'pseudo_voigt':
+                    # eta: 0 to 1
+                    lower_bounds.append(0)
+                    upper_bounds.append(1)
+                else:  # voigt
+                    # gamma: positive
+                    lower_bounds.append(x_range * 0.001)
+                    upper_bounds.append(x_range * 0.5)
         
         # Baseline bounds
         if n_baseline >= 1:  # constant
@@ -698,22 +1813,29 @@ class GaussianFitter:
     
     def preview_fit(self, x, peak_params, y_max, baseline_params=None):
         """Preview fit without optimization (fast)"""
-        n_peaks = len(peak_params) // 3
+        n_peaks = len(peak_params) // self.get_params_per_peak()
         n_baseline = self.get_n_baseline_params()
         
         if baseline_params is None and n_baseline > 0:
-            # Use default baseline
             if self.baseline_method == 'constant':
                 baseline_params = [0]
             elif self.baseline_method == 'linear':
                 baseline_params = [0, 0]
-            else:  # quadratic
+            else:
                 baseline_params = [0, 0, 0]
         
-        # Calculate fit
-        fit_y_norm = GaussianModel.multi_gaussian_with_baseline(
-            x, n_peaks, peak_params, baseline_params or [], self.baseline_method
-        )
+        # Calculate fit using appropriate model
+        model_func = self.get_model_func(n_peaks)
+        fit_y_norm = model_func(x, *peak_params)
+        
+        # Add baseline if provided
+        if baseline_params and n_baseline > 0:
+            if self.baseline_method == 'constant':
+                fit_y_norm += baseline_params[0]
+            elif self.baseline_method == 'linear':
+                fit_y_norm += baseline_params[0] + baseline_params[1] * x
+            elif self.baseline_method == 'quadratic':
+                fit_y_norm += baseline_params[0] + baseline_params[1] * x + baseline_params[2] * x**2
         
         return fit_y_norm
 
@@ -790,7 +1912,11 @@ class SpectrumPlotter:
         source_colors = {
             'auto': 'green',
             'manual': 'orange',
-            'residuals': 'blue'
+            'residuals': 'blue',
+            'find_peaks': 'lime',
+            'second_derivative': 'cyan',
+            'cwt': 'magenta',
+            'hybrid': 'purple'
         }
         
         # Mark detected peaks with source-based colors
@@ -799,6 +1925,18 @@ class SpectrumPlotter:
             color = source_colors.get(source, 'green')
             marker_color = 'darkred' if source == 'auto' else 'darkorange' if source == 'manual' else 'darkblue'
             facecolor = 'lime' if source == 'auto' else 'orange' if source == 'manual' else 'lightblue'
+            
+            # Use method-specific colors for hybrid detection
+            if 'method' in info:
+                method = info.get('method', 'auto')
+                method_colors = {
+                    'find_peaks': 'green',
+                    'second_derivative': 'cyan',
+                    'cwt': 'magenta',
+                    'hybrid': 'purple'
+                }
+                facecolor = method_colors.get(method, 'lime')
+                marker_color = 'dark' + facecolor
             
             peak_y_original = info['y_original']
             ax.plot(info['x_linear'], peak_y_original, 
@@ -892,8 +2030,21 @@ class SpectrumPlotter:
         if show_components and deconvolver.components:
             colors = plt.cm.Set3(np.linspace(0, 1, len(deconvolver.components)))
             for c, color in zip(deconvolver.components, colors):
-                y_component = GaussianModel.gaussian(x_dense_log, c['amp_norm'], 
-                                                    c['cen_log'], c['sigma_log']) * deconvolver.y_max
+                # Generate component using appropriate model
+                if c.get('model_type', 'gaussian') == 'gaussian':
+                    y_component = GaussianModel.gaussian(x_dense_log, c['amp_norm'], 
+                                                        c['cen_log'], c['sigma_log']) * deconvolver.y_max
+                elif c.get('model_type', 'gaussian') == 'lorentzian':
+                    y_component = GaussianModel.lorentzian(x_dense_log, c['amp_norm'], 
+                                                          c['cen_log'], c['sigma_log']) * deconvolver.y_max
+                elif c.get('model_type', 'gaussian') == 'pseudo_voigt':
+                    eta = c.get('eta', 0.5)
+                    y_component = GaussianModel.pseudo_voigt(x_dense_log, c['amp_norm'], 
+                                                            c['cen_log'], c['sigma_log'], eta) * deconvolver.y_max
+                else:  # voigt
+                    gamma = c.get('gamma', c['sigma_log'] * 0.5)
+                    y_component = GaussianModel.voigt(x_dense_log, c['amp_norm'], 
+                                                     c['cen_log'], c['sigma_log'], gamma) * deconvolver.y_max
                 
                 # Fill under Gaussian
                 ax.fill_between(x_dense, 0, y_component, 
@@ -932,12 +2083,32 @@ class SpectrumPlotter:
                 n_peaks = len(deconvolver.components)
                 peak_params = []
                 for c in deconvolver.components:
-                    peak_params.extend([c['amp_norm'], c['cen_log'], c['sigma_log']])
+                    if c.get('model_type', 'gaussian') in ['gaussian', 'lorentzian']:
+                        peak_params.extend([c['amp_norm'], c['cen_log'], c['sigma_log']])
+                    else:
+                        peak_params.extend([c['amp_norm'], c['cen_log'], c['sigma_log'], c.get('eta', 0.5)])
                 
-                y_total = GaussianModel.multi_gaussian_with_baseline(
-                    x_dense_log, n_peaks, peak_params, 
-                    deconvolver.baseline_params, deconvolver.baseline_method
-                ) * deconvolver.y_max
+                # Use appropriate model for total fit
+                model_type = deconvolver.model_type if hasattr(deconvolver, 'model_type') else 'gaussian'
+                if model_type == 'gaussian':
+                    y_total = GaussianModel.multi_gaussian(x_dense_log, *peak_params) * deconvolver.y_max
+                elif model_type == 'lorentzian':
+                    y_total = GaussianModel.multi_lorentzian(x_dense_log, *peak_params) * deconvolver.y_max
+                elif model_type == 'pseudo_voigt':
+                    y_total = GaussianModel.multi_pseudo_voigt(x_dense_log, *peak_params) * deconvolver.y_max
+                else:
+                    y_total = GaussianModel.multi_voigt(x_dense_log, *peak_params) * deconvolver.y_max
+                
+                # Add baseline
+                if deconvolver.baseline_method == 'constant':
+                    y_total += deconvolver.baseline_params[0] * deconvolver.y_max
+                elif deconvolver.baseline_method == 'linear':
+                    y_total += (deconvolver.baseline_params[0] + 
+                               deconvolver.baseline_params[1] * x_dense_log) * deconvolver.y_max
+                elif deconvolver.baseline_method == 'quadratic':
+                    y_total += (deconvolver.baseline_params[0] + 
+                               deconvolver.baseline_params[1] * x_dense_log +
+                               deconvolver.baseline_params[2] * x_dense_log**2) * deconvolver.y_max
             else:
                 y_total = GaussianModel.multi_gaussian(x_dense_log, *deconvolver.popt) * deconvolver.y_max
             
@@ -953,7 +2124,8 @@ class SpectrumPlotter:
         # Add quality metrics to plot if available
         if deconvolver.quality_metrics and not preview_mode:
             metrics_text = f"R² = {deconvolver.quality_metrics.get('R²', 0):.4f}\n"
-            metrics_text += f"RMSE = {deconvolver.quality_metrics.get('RMSE', 0):.2e}"
+            metrics_text += f"RMSE = {deconvolver.quality_metrics.get('RMSE', 0):.2e}\n"
+            metrics_text += f"AIC = {deconvolver.quality_metrics.get('AIC', 0):.1f}"
             ax.text(0.02, 0.98, metrics_text, transform=ax.transAxes,
                     fontsize=10, verticalalignment='top',
                     bbox=dict(boxstyle="round,pad=0.3", facecolor='white', alpha=0.8))
@@ -1004,7 +2176,7 @@ class PeakVisualizer:
                    f'{i+1}', ha='center', fontweight='bold')
         
         ax.set_xlabel(deconvolver.x_label)
-        ax.set_ylabel(deconvolver.y_label)  # Original Y label
+        ax.set_ylabel(deconvolver.y_label)
         ax.set_title('Detected Peaks (Original Scale)')
         ax.legend()
         ax.grid(True, alpha=0.3)
@@ -1022,11 +2194,14 @@ class PeakVisualizer:
 
 
 class GaussianDeconvolver:
-    """Main class for spectral deconvolution with baseline correction"""
+    """Main class for spectral deconvolution with baseline correction and multiple models"""
     
     def __init__(self, x_linear, y_original, use_log_x=True, use_log_y=False,
-                 clip_negative=True, show_warnings=True, baseline_method='none',
-                 smoothing_level='none'):
+                 clip_negative=True, show_warnings=True, baseline_method='arpls',
+                 smoothing_level='adaptive', model_type='pseudo_voigt',
+                 use_aic_bic_control=True, aic_bic_threshold=2.0,
+                 peak_detection_method='hybrid', baseline_lam=1e5, baseline_p=0.01,
+                 baseline_iterations=10, adaptive_smoothing_factor=1.0):
         # Store original data WITHOUT ANY MODIFICATIONS for display purposes
         self.x_original = np.array(x_linear).copy()
         self.y_original_raw = np.array(y_original).copy()
@@ -1038,6 +2213,14 @@ class GaussianDeconvolver:
         self.use_log_y = use_log_y
         self.baseline_method = baseline_method
         self.smoothing_level = smoothing_level
+        self.model_type = model_type
+        self.use_aic_bic_control = use_aic_bic_control
+        self.aic_bic_threshold = aic_bic_threshold
+        self.peak_detection_method = peak_detection_method
+        self.baseline_lam = baseline_lam
+        self.baseline_p = baseline_p
+        self.baseline_iterations = baseline_iterations
+        self.adaptive_smoothing_factor = adaptive_smoothing_factor
         
         # Sort by X to ensure monotonic increasing X
         sort_idx = np.argsort(self.x_linear)
@@ -1051,7 +2234,8 @@ class GaussianDeconvolver:
         # Preprocess data
         self.preprocessor = DataPreprocessor(clip_negative, show_warnings)
         preprocessed = self.preprocessor.preprocess_for_fitting(
-            self.x_linear, self.y_original, use_log_x, use_log_y, smoothing_level
+            self.x_linear, self.y_original, use_log_x, use_log_y, smoothing_level,
+            baseline_method, baseline_lam, baseline_p, 1, baseline_iterations
         )
         
         # Update with preprocessed data
@@ -1064,6 +2248,8 @@ class GaussianDeconvolver:
         self.y_label = preprocessed['y_label']
         self.clipped_points = preprocessed['clipped_points']
         self.small_values_warning = preprocessed['small_values_warning']
+        self.baseline_removed = preprocessed['baseline_removed']
+        self.baseline_values = preprocessed['baseline_values']
         
         # Normalization - use 95th percentile instead of max for robustness
         self.y_max = np.percentile(self.y_for_fitting, 95) if np.any(self.y_for_fitting > 0) else 1.0
@@ -1082,6 +2268,9 @@ class GaussianDeconvolver:
         self.quality_metrics = {}
         self.convergence_history = []
         self.total_area = 0
+        self.aic_history = []
+        self.bic_history = []
+        self.peak_count_history = []
         
         # Fitter
         self.fitter = None
@@ -1090,46 +2279,93 @@ class GaussianDeconvolver:
         self.multi_gaussian = GaussianModel.multi_gaussian
         self.gaussian = GaussianModel.gaussian
     
-    def auto_detect_peaks(self, sensitivity=0.03, min_distance=5):
-        """Automatic peak detection using derivatives"""
-        # Smoothing
-        window_length = min(11, len(self.y_norm) // 5 * 2 + 1)
-        if window_length % 2 == 0:
-            window_length += 1
+    def auto_detect_peaks(self, sensitivity=0.03, min_distance=5, method='hybrid'):
+        """
+        Automatic peak detection using selected method.
         
-        if window_length >= 5:
-            y_smooth = savgol_filter(self.y_norm, window_length, 3)
+        Methods:
+        - 'hybrid': Combination of find_peaks, second derivative, and CWT
+        - 'find_peaks': SciPy find_peaks with prominence
+        - 'second_derivative': Second derivative method
+        - 'cwt': Continuous Wavelet Transform
+        """
+        # Smoothing for peak detection
+        if self.smoothing_level != 'none':
+            y_smooth = self.preprocessor.smooth_data(
+                self.x, self.y_norm, 'savgol', self.smoothing_level, self.use_log_x
+            )
         else:
             y_smooth = self.y_norm
         
-        # Calculate derivatives
-        dy, d2y, y_smooth = DerivativeAnalyzer.calculate_derivatives(self.x, y_smooth)
+        # If adaptive smoothing is enabled, use it
+        if self.smoothing_level == 'adaptive':
+            y_smooth = AdaptiveSmoother.adaptive_savgol(self.y_norm, base_window=5)
         
-        # Peak search with different methods
-        height_threshold = sensitivity * np.max(y_smooth)
-        peaks1, _ = find_peaks(y_smooth, height=height_threshold, distance=min_distance)
-        peaks2 = DerivativeAnalyzer.find_peaks_by_derivatives(self.x, y_smooth, dy, d2y, sensitivity)
-        
-        # Combine results
-        all_peaks = sorted(set(np.concatenate([peaks1, peaks2])))
-        
-        # Filter close peaks
-        filtered_peaks = []
-        for peak in all_peaks:
-            if not filtered_peaks or abs(self.x[peak] - self.x[filtered_peaks[-1]]) > min_distance * np.mean(np.diff(self.x)):
-                filtered_peaks.append(peak)
+        if method == 'hybrid':
+            peaks, peak_details = HybridPeakFinder.find_peaks_hybrid(
+                self.x, y_smooth, sensitivity, min_distance
+            )
+        elif method == 'find_peaks':
+            height_threshold = sensitivity * np.max(y_smooth)
+            peaks, properties = find_peaks(
+                y_smooth, height=height_threshold, distance=min_distance
+            )
+            peak_details = []
+            for idx in peaks:
+                peak_details.append({
+                    'index': idx,
+                    'method': 'find_peaks',
+                    'height': y_smooth[idx],
+                    'prominence': properties['prominences'][np.where(peaks == idx)[0][0]] if idx in peaks else 0,
+                    'width': properties['widths'][np.where(peaks == idx)[0][0]] if idx in peaks else 0
+                })
+        elif method == 'second_derivative':
+            peaks = DerivativeAnalyzer.find_peaks_by_second_derivative(
+                self.x, y_smooth, sensitivity, min_distance
+            )
+            peak_details = []
+            for idx in peaks:
+                peak_details.append({
+                    'index': idx,
+                    'method': 'second_derivative',
+                    'height': y_smooth[idx],
+                    'prominence': 0,
+                    'width': 0
+                })
+        elif method == 'cwt':
+            try:
+                widths = np.arange(2, min(15, len(y_smooth) // 10))
+                peaks = find_peaks_cwt(y_smooth, widths, min_snr=sensitivity * 2)
+                peak_details = []
+                for idx in peaks:
+                    peak_details.append({
+                        'index': idx,
+                        'method': 'cwt',
+                        'height': y_smooth[idx],
+                        'prominence': 0,
+                        'width': 0
+                    })
+            except Exception as e:
+                warnings.warn(f"CWT failed: {e}")
+                peaks = []
+                peak_details = []
+        else:
+            # Default to hybrid
+            peaks, peak_details = HybridPeakFinder.find_peaks_hybrid(
+                self.x, y_smooth, sensitivity, min_distance
+            )
         
         # Estimate parameters
         peak_info = []
         initial_params = []
         
-        for peak_idx in filtered_peaks:
+        for peak_idx in peaks:
             cen = self.x[peak_idx]
             amp = y_smooth[peak_idx]
             
             # Estimate sigma with fallback
             sigma = GaussianModel.estimate_sigma_from_peak(self.x, y_smooth, peak_idx)
-            sigma = max(sigma, 0.01 * (np.max(self.x) - np.min(self.x)) / max(len(filtered_peaks), 1))
+            sigma = max(sigma, 0.01 * (np.max(self.x) - np.min(self.x)) / max(len(peaks), 1))
             
             # Get original Y value for display
             if self.use_log_x:
@@ -1137,29 +2373,49 @@ class GaussianDeconvolver:
             else:
                 x_linear = self.x[peak_idx]
             
-            # Find closest index in original data - always in linear space
+            # Find closest index in original data
             idx = np.argmin(np.abs(self.x_sorted - x_linear))
             y_original_value = self.y_sorted[idx]
+            
+            # Get method from peak_details
+            method_used = 'auto'
+            for detail in peak_details:
+                if detail['index'] == peak_idx:
+                    method_used = detail.get('method', 'auto')
+                    break
             
             peak_info.append({
                 'index': peak_idx,
                 'x': self.x[peak_idx],
                 'x_linear': x_linear,
-                'y': self.y[peak_idx],  # This is in transformed scale (log if use_log_y)
-                'y_original': y_original_value,  # This is in original scale
+                'y': self.y[peak_idx],
+                'y_original': y_original_value,
                 'amp_est': amp,
                 'cen_est': cen,
                 'sigma_est': sigma,
-                'dy': dy[peak_idx],
-                'd2y': d2y[peak_idx],
-                'source': 'auto'  # Mark source as auto-detected
+                'dy': 0,
+                'd2y': 0,
+                'source': 'auto',
+                'method': method_used
             })
             
-            initial_params.extend([amp, cen, sigma])
+            # Add parameters based on model type
+            if self.model_type in ['gaussian', 'lorentzian']:
+                initial_params.extend([amp, cen, sigma])
+            else:  # pseudo_voigt or voigt
+                eta = GaussianModel.estimate_eta_from_peak(self.x, y_smooth, peak_idx)
+                if self.model_type == 'pseudo_voigt':
+                    initial_params.extend([amp, cen, sigma, eta])
+                else:  # voigt
+                    gamma = sigma * 0.5
+                    initial_params.extend([amp, cen, sigma, gamma])
         
-        return filtered_peaks, peak_info, initial_params, (dy, d2y, y_smooth)
+        # Calculate derivatives for visualization
+        dy, d2y, y_smooth_deriv = DerivativeAnalyzer.calculate_derivatives(self.x, y_smooth)
+        
+        return peaks, peak_info, initial_params, (dy, d2y, y_smooth_deriv)
     
-    def add_manual_peak(self, x_position_linear, amplitude=None, sigma_est=None):
+    def add_manual_peak(self, x_position_linear, amplitude=None, sigma_est=None, eta_est=None):
         """Add a peak manually at specified linear X position"""
         # Convert to log space if needed
         if self.use_log_x:
@@ -1172,9 +2428,7 @@ class GaussianDeconvolver:
         
         # Estimate amplitude if not provided
         if amplitude is None:
-            # Get normalized amplitude at this position
             if self.use_log_x:
-                # Find closest index in log space
                 log_idx = np.argmin(np.abs(self.x - x_position))
                 amplitude = self.y_norm[log_idx] if log_idx < len(self.y_norm) else 0.1
             else:
@@ -1182,7 +2436,6 @@ class GaussianDeconvolver:
         
         # Estimate sigma if not provided
         if sigma_est is None:
-            # Estimate based on distance to nearest minimum
             if self.use_log_x:
                 x_search = self.x
                 y_search = self.y_norm
@@ -1190,7 +2443,6 @@ class GaussianDeconvolver:
                 x_search = self.x_linear
                 y_search = self.y_original / self.y_max
             
-            # Find nearest minima to left and right
             left_idx = idx
             right_idx = idx
             for i in range(idx - 1, 0, -1):
@@ -1202,9 +2454,12 @@ class GaussianDeconvolver:
                     right_idx = i
                     break
             
-            # Estimate sigma
             width = (x_search[right_idx] - x_search[left_idx]) if right_idx > left_idx else 0.1
             sigma_est = max(width / 3.0, 0.01 * (np.max(x_search) - np.min(x_search)) / 20)
+        
+        # Estimate eta if not provided
+        if eta_est is None:
+            eta_est = 0.5
         
         # Add peak info
         peak_info_entry = {
@@ -1218,10 +2473,17 @@ class GaussianDeconvolver:
             'sigma_est': sigma_est,
             'dy': 0,
             'd2y': 0,
-            'source': 'manual'
+            'source': 'manual',
+            'method': 'manual'
         }
         
-        return peak_info_entry, [amplitude, x_position, sigma_est]
+        # Add parameters based on model type
+        if self.model_type in ['gaussian', 'lorentzian']:
+            initial_params = [amplitude, x_position, sigma_est]
+        else:
+            initial_params = [amplitude, x_position, sigma_est, eta_est]
+        
+        return peak_info_entry, initial_params
     
     def find_missing_peaks_by_residuals(self, peak_info, sensitivity=0.02, min_distance=5):
         """Find missing peaks by analyzing residuals after initial fit"""
@@ -1233,56 +2495,41 @@ class GaussianDeconvolver:
         if n_peaks == 0:
             return [], []
         
+        # Get parameters based on model type
+        params_per_peak = 4 if self.model_type in ['pseudo_voigt', 'voigt'] else 3
         peak_params = []
         for info in peak_info:
-            peak_params.extend([info['amp_est'], info['cen_est'], info['sigma_est']])
+            if params_per_peak == 3:
+                peak_params.extend([info['amp_est'], info['cen_est'], info['sigma_est']])
+            else:
+                eta = info.get('eta_est', 0.5)
+                peak_params.extend([info['amp_est'], info['cen_est'], info['sigma_est'], eta])
         
         # Calculate initial fit
-        y_initial_fit = GaussianModel.multi_gaussian(self.x, *peak_params)
+        if self.model_type == 'gaussian':
+            y_initial_fit = GaussianModel.multi_gaussian(self.x, *peak_params)
+        elif self.model_type == 'lorentzian':
+            y_initial_fit = GaussianModel.multi_lorentzian(self.x, *peak_params)
+        elif self.model_type == 'pseudo_voigt':
+            y_initial_fit = GaussianModel.multi_pseudo_voigt(self.x, *peak_params)
+        else:  # voigt
+            y_initial_fit = GaussianModel.multi_voigt(self.x, *peak_params)
         
         # Calculate residuals
         residuals = self.y_norm - y_initial_fit
         
-        # Detect peaks in residuals
-        height_threshold = sensitivity * np.max(np.abs(residuals))
-        
-        # Smooth residuals for better peak detection
-        window_length = min(11, len(residuals) // 5 * 2 + 1)
-        if window_length % 2 == 0:
-            window_length += 1
-        
-        if window_length >= 5:
-            residuals_smooth = savgol_filter(residuals, window_length, 3)
-        else:
-            residuals_smooth = residuals
-        
-        # Find positive peaks (where data exceeds fit)
-        positive_peaks, _ = find_peaks(residuals_smooth, height=height_threshold, distance=min_distance)
-        
-        # Find negative peaks (where fit exceeds data - potential shoulders)
-        negative_peaks, _ = find_peaks(-residuals_smooth, height=height_threshold, distance=min_distance)
-        
-        # Combine and filter
-        all_candidate_indices = sorted(set(positive_peaks) | set(negative_peaks))
+        # Use ResidualsAnalyzer to find missing peaks
+        suggested = ResidualsAnalyzer.suggest_peaks_from_residuals(
+            self.x, residuals, peak_info, sensitivity, min_distance
+        )
         
         missing_peaks = []
         missing_params = []
         
-        for idx in all_candidate_indices:
-            # Skip if too close to existing peaks
-            too_close = False
-            for info in peak_info:
-                if abs(self.x[idx] - info['cen_est']) < min_distance * np.mean(np.diff(self.x)):
-                    too_close = True
-                    break
-            
-            if too_close:
-                continue
-            
-            cen = self.x[idx]
-            amp = abs(residuals_smooth[idx])  # Use absolute value for amplitude
-            sigma = GaussianModel.estimate_sigma_from_peak(self.x, residuals_smooth, idx)
-            sigma = max(sigma, 0.01 * (np.max(self.x) - np.min(self.x)) / 20)
+        for suggestion in suggested:
+            cen = suggestion['cen']
+            amp = suggestion['amp']
+            sigma = suggestion['sigma']
             
             # Get original Y value for display
             if self.use_log_x:
@@ -1290,12 +2537,14 @@ class GaussianDeconvolver:
             else:
                 x_linear = cen
             
-            # Find closest index in original data
             orig_idx = np.argmin(np.abs(self.x_sorted - x_linear))
             y_original_value = self.y_sorted[orig_idx]
             
+            # Estimate eta
+            eta = GaussianModel.estimate_eta_from_peak(self.x, residuals, suggestion['index'])
+            
             missing_peaks.append({
-                'index': idx,
+                'index': suggestion['index'],
                 'x': cen,
                 'x_linear': x_linear,
                 'y': amp,
@@ -1305,10 +2554,17 @@ class GaussianDeconvolver:
                 'sigma_est': sigma,
                 'dy': 0,
                 'd2y': 0,
-                'source': 'residuals'
+                'source': 'residuals',
+                'method': 'residuals',
+                'eta_est': eta,
+                'sign': suggestion['sign']
             })
             
-            missing_params.extend([amp, cen, sigma])
+            # Add parameters based on model type
+            if self.model_type in ['gaussian', 'lorentzian']:
+                missing_params.extend([amp, cen, sigma])
+            else:
+                missing_params.extend([amp, cen, sigma, eta])
         
         return missing_peaks, missing_params
     
@@ -1316,7 +2572,7 @@ class GaussianDeconvolver:
             fit_quality='balanced', last_popt=None, progress_callback=None):
         """Perform fitting with selected method and baseline"""
         if initial_params is None:
-            _, _, initial_params, _ = self.auto_detect_peaks()
+            _, _, initial_params, _ = self.auto_detect_peaks(method=self.peak_detection_method)
         
         if len(initial_params) == 0:
             return False
@@ -1327,7 +2583,10 @@ class GaussianDeconvolver:
             max_nfev=maxfev,
             baseline_method=self.baseline_method,
             fit_quality=fit_quality,
-            last_popt=last_popt
+            last_popt=last_popt,
+            model_type=self.model_type,
+            use_aic_bic_control=self.use_aic_bic_control,
+            aic_bic_threshold=self.aic_bic_threshold
         )
         
         # Perform fit
@@ -1340,18 +2599,41 @@ class GaussianDeconvolver:
             self.popt = popt
             self.components = components
             self.baseline_params = baseline_params
+            self.aic_history = self.fitter.aic_history
+            self.bic_history = self.fitter.bic_history
+            self.peak_count_history = self.fitter.peak_count_history
             
             # Reconstruct full fit with baseline
             n_peaks = len(components)
+            params_per_peak = self.fitter.get_params_per_peak()
             peak_params = []
             for c in components:
-                peak_params.extend([c['amp_norm'], c['cen_log'], c['sigma_log']])
+                if params_per_peak == 3:
+                    peak_params.extend([c['amp_norm'], c['cen_log'], c['sigma_log']])
+                else:
+                    peak_params.extend([c['amp_norm'], c['cen_log'], c['sigma_log'], c.get('eta', 0.5)])
             
-            self.fit_y_norm = GaussianModel.multi_gaussian_with_baseline(
-                self.x, n_peaks, peak_params, baseline_params or [], self.baseline_method
-            )
+            # Use appropriate model for total fit
+            model_type = self.model_type
+            if model_type == 'gaussian':
+                self.fit_y_norm = GaussianModel.multi_gaussian(self.x, *peak_params)
+            elif model_type == 'lorentzian':
+                self.fit_y_norm = GaussianModel.multi_lorentzian(self.x, *peak_params)
+            elif model_type == 'pseudo_voigt':
+                self.fit_y_norm = GaussianModel.multi_pseudo_voigt(self.x, *peak_params)
+            else:  # voigt
+                self.fit_y_norm = GaussianModel.multi_voigt(self.x, *peak_params)
             
-            # Calculate total area (excluding baseline)
+            # Add baseline if present
+            if baseline_params and self.baseline_method != 'none':
+                if self.baseline_method == 'constant':
+                    self.fit_y_norm += baseline_params[0]
+                elif self.baseline_method == 'linear':
+                    self.fit_y_norm += baseline_params[0] + baseline_params[1] * self.x
+                elif self.baseline_method == 'quadratic':
+                    self.fit_y_norm += baseline_params[0] + baseline_params[1] * self.x + baseline_params[2] * self.x**2
+            
+            # Calculate total area
             self.total_area = sum([c['area'] for c in self.components])
             
             # Quality metrics
@@ -1366,14 +2648,15 @@ class GaussianDeconvolver:
     def preview_fit(self, initial_params=None):
         """Preview fit without optimization (fast)"""
         if initial_params is None:
-            _, _, initial_params, _ = self.auto_detect_peaks()
+            _, _, initial_params, _ = self.auto_detect_peaks(method=self.peak_detection_method)
         
         if len(initial_params) == 0:
             return None
         
         # Create temporary fitter
         fitter = GaussianFitter(
-            baseline_method=self.baseline_method
+            baseline_method=self.baseline_method,
+            model_type=self.model_type
         )
         
         # Preview fit
@@ -1391,7 +2674,6 @@ class GaussianDeconvolver:
         if peak_id > len(self.components):
             return False
         
-        # Store the operation
         st.session_state.app_state.pending_remove = peak_id
         return True
     
@@ -1400,17 +2682,19 @@ class GaussianDeconvolver:
         if peak_id > len(self.components):
             return False
         
-        # Store the operation
         st.session_state.app_state.pending_split = (peak_id, split_position)
         return True
     
     def apply_pending_operations(self, fit_quality='balanced', progress_callback=None):
         """Apply all pending operations and perform fit"""
-        # Get current parameters
         if self.components:
             current_params = []
+            params_per_peak = 4 if self.model_type in ['pseudo_voigt', 'voigt'] else 3
             for c in self.components:
-                current_params.extend([c['amp_norm'], c['cen_log'], c['sigma_log']])
+                if params_per_peak == 3:
+                    current_params.extend([c['amp_norm'], c['cen_log'], c['sigma_log']])
+                else:
+                    current_params.extend([c['amp_norm'], c['cen_log'], c['sigma_log'], c.get('eta', 0.5)])
         else:
             return False
         
@@ -1420,7 +2704,10 @@ class GaussianDeconvolver:
             new_params = []
             for i, c in enumerate(self.components):
                 if i != remove_id - 1:
-                    new_params.extend([c['amp_norm'], c['cen_log'], c['sigma_log']])
+                    if params_per_peak == 3:
+                        new_params.extend([c['amp_norm'], c['cen_log'], c['sigma_log']])
+                    else:
+                        new_params.extend([c['amp_norm'], c['cen_log'], c['sigma_log'], c.get('eta', 0.5)])
             current_params = new_params
             st.session_state.app_state.pending_remove = None
         
@@ -1444,10 +2731,19 @@ class GaussianDeconvolver:
                     sigma1 = c['sigma_log'] * 0.7
                     sigma2 = c['sigma_log'] * 0.7
                     
-                    new_params.extend([amp1, cen1, sigma1])
-                    new_params.extend([amp2, cen2, sigma2])
+                    if params_per_peak == 3:
+                        new_params.extend([amp1, cen1, sigma1])
+                        new_params.extend([amp2, cen2, sigma2])
+                    else:
+                        eta1 = c.get('eta', 0.5)
+                        eta2 = c.get('eta', 0.5)
+                        new_params.extend([amp1, cen1, sigma1, eta1])
+                        new_params.extend([amp2, cen2, sigma2, eta2])
                 else:
-                    new_params.extend([c['amp_norm'], c['cen_log'], c['sigma_log']])
+                    if params_per_peak == 3:
+                        new_params.extend([c['amp_norm'], c['cen_log'], c['sigma_log']])
+                    else:
+                        new_params.extend([c['amp_norm'], c['cen_log'], c['sigma_log'], c.get('eta', 0.5)])
             
             current_params = new_params
             st.session_state.app_state.pending_split = None
@@ -1588,12 +2884,13 @@ class GaussianDeconvolver:
             ),
             cells=dict(
                 values=[
-                    ['R²', 'AIC', 'BIC', 'χ²', 'RMSE'],
+                    ['R²', 'AIC', 'BIC', 'χ²', 'RMSE', 'MAE'],
                     [f"{metrics.get('R²', 0):.6f}", 
                      f"{metrics.get('AIC', 0):.2f}",
                      f"{metrics.get('BIC', 0):.2f}",
                      f"{metrics.get('χ²', 0):.2e}",
-                     f"{metrics.get('RMSE', 0):.2e}"]
+                     f"{metrics.get('RMSE', 0):.2e}",
+                     f"{metrics.get('MAE', 0):.2e}"]
                 ],
                 fill_color='white',
                 align='center',
@@ -1839,8 +3136,29 @@ with st.sidebar:
         st.session_state.app_state.smoothing_level = st.selectbox(
             "Data smoothing",
             options=['none', 'light', 'medium', 'strong', 'adaptive'],
-            index=0,
+            index=4 if st.session_state.app_state.smoothing_level == 'adaptive' else 
+                  0 if st.session_state.app_state.smoothing_level == 'none' else
+                  1 if st.session_state.app_state.smoothing_level == 'light' else
+                  2 if st.session_state.app_state.smoothing_level == 'medium' else 3,
             help="Smooth noisy data before peak detection. Adaptive automatically adjusts based on noise level."
+        )
+        
+        st.session_state.app_state.peak_detection_method = st.selectbox(
+            "Peak detection method",
+            options=['hybrid', 'find_peaks', 'second_derivative', 'cwt'],
+            index=0 if st.session_state.app_state.peak_detection_method == 'hybrid' else
+                  1 if st.session_state.app_state.peak_detection_method == 'find_peaks' else
+                  2 if st.session_state.app_state.peak_detection_method == 'second_derivative' else 3,
+            help="hybrid: combination of all methods (recommended)"
+        )
+        
+        st.session_state.app_state.model_type = st.selectbox(
+            "Peak model",
+            options=['gaussian', 'lorentzian', 'pseudo_voigt', 'voigt'],
+            index=2 if st.session_state.app_state.model_type == 'pseudo_voigt' else
+                  0 if st.session_state.app_state.model_type == 'gaussian' else
+                  1 if st.session_state.app_state.model_type == 'lorentzian' else 3,
+            help="pseudo_voigt: recommended for Raman spectra"
         )
         
         st.session_state.app_state.fitting_method = st.selectbox(
@@ -1868,10 +3186,57 @@ with st.sidebar:
         
         st.session_state.app_state.baseline_method = st.selectbox(
             "Baseline correction",
-            options=['none', 'constant', 'linear', 'quadratic'],
-            index=0,
-            help="Remove background before fitting"
+            options=['none', 'arpls', 'polynomial', 'constant'],
+            index=1 if st.session_state.app_state.baseline_method == 'arpls' else
+                  0 if st.session_state.app_state.baseline_method == 'none' else
+                  2 if st.session_state.app_state.baseline_method == 'polynomial' else 3,
+            help="arpls: Asymmetric Least Squares (recommended for Raman)"
         )
+        
+        if st.session_state.app_state.baseline_method == 'arpls':
+            st.session_state.app_state.baseline_lam = st.number_input(
+                "Lambda (smoothness)",
+                min_value=1e3,
+                max_value=1e8,
+                value=float(st.session_state.app_state.baseline_lam),
+                step=1e4,
+                format="%.0f",
+                help="Higher values give smoother baseline"
+            )
+            
+            st.session_state.app_state.baseline_p = st.slider(
+                "p (asymmetry)",
+                min_value=0.001,
+                max_value=0.1,
+                value=float(st.session_state.app_state.baseline_p),
+                step=0.001,
+                format="%.3f",
+                help="Higher values give more aggressive baseline removal"
+            )
+            
+            st.session_state.app_state.baseline_iterations = st.number_input(
+                "Iterations",
+                min_value=5,
+                max_value=50,
+                value=st.session_state.app_state.baseline_iterations,
+                step=5
+            )
+        
+        st.session_state.app_state.use_aic_bic_control = st.checkbox(
+            "AIC/BIC control (auto peak count)",
+            value=st.session_state.app_state.use_aic_bic_control,
+            help="Automatically determines optimal number of peaks"
+        )
+        
+        if st.session_state.app_state.use_aic_bic_control:
+            st.session_state.app_state.aic_bic_threshold = st.slider(
+                "AIC/BIC improvement threshold",
+                min_value=0.5,
+                max_value=5.0,
+                value=float(st.session_state.app_state.aic_bic_threshold),
+                step=0.5,
+                help="Minimum improvement required to add a peak"
+            )
         
         st.session_state.app_state.preview_mode = st.checkbox(
             "Preview mode (no fitting)",
@@ -2013,7 +3378,6 @@ elif st.session_state.app_state.current_step == 2:
         
         # Display X range information
         if st.session_state.app_state.use_log_x:
-            # For log scale, show both linear and log values
             log_min = np.log10(max(range_min_linear, 1e-12))
             log_max = np.log10(range_max_linear)
             st.info(f"X range: {range_min_linear:.3e} - {range_max_linear:.3e} (linear)\n"
@@ -2092,7 +3456,6 @@ elif st.session_state.app_state.current_step == 2:
 
         # Highlight selected range on full data plot
         if len(x_preview) < len(st.session_state.app_state.raw_x):
-            # Get the X range of selected points
             if len(x_preview) > 0:
                 x_min_selected = np.min(x_preview)
                 x_max_selected = np.max(x_preview)
@@ -2122,7 +3485,14 @@ elif st.session_state.app_state.current_step == 3:
             clip_negative=st.session_state.app_state.clip_negative,
             show_warnings=st.session_state.app_state.show_warnings,
             baseline_method=st.session_state.app_state.baseline_method,
-            smoothing_level=st.session_state.app_state.smoothing_level
+            smoothing_level=st.session_state.app_state.smoothing_level,
+            model_type=st.session_state.app_state.model_type,
+            use_aic_bic_control=st.session_state.app_state.use_aic_bic_control,
+            aic_bic_threshold=st.session_state.app_state.aic_bic_threshold,
+            peak_detection_method=st.session_state.app_state.peak_detection_method,
+            baseline_lam=st.session_state.app_state.baseline_lam,
+            baseline_p=st.session_state.app_state.baseline_p,
+            baseline_iterations=st.session_state.app_state.baseline_iterations
         )
         
         # Show warnings if any
@@ -2130,6 +3500,8 @@ elif st.session_state.app_state.current_step == 3:
             st.warning(f"Clipped {st.session_state.app_state.deconvolver.clipped_points} negative values to 0")
         if st.session_state.app_state.deconvolver.small_values_warning:
             st.warning("Very small Y values detected. Log transformation may cause artifacts.")
+        if st.session_state.app_state.deconvolver.baseline_removed:
+            st.success(f"Baseline removed using {st.session_state.app_state.baseline_method} method")
     
     col1, col2 = st.columns([1, 2])
     
@@ -2153,9 +3525,11 @@ elif st.session_state.app_state.current_step == 3:
             step=1
         )
         
-        # Show smoothing preview option if smoothing is enabled
-        if st.session_state.app_state.smoothing_level != 'none':
-            st.info(f"Smoothing: {st.session_state.app_state.smoothing_level}")
+        # Show current settings
+        st.info(f"Method: {st.session_state.app_state.peak_detection_method}\n"
+                f"Model: {st.session_state.app_state.model_type}\n"
+                f"Smoothing: {st.session_state.app_state.smoothing_level}\n"
+                f"Baseline: {st.session_state.app_state.baseline_method}")
         
         col_a, col_b = st.columns(2)
         with col_a:
@@ -2167,7 +3541,8 @@ elif st.session_state.app_state.current_step == 3:
                 with st.spinner("Detecting peaks..."):
                     peaks, peak_info, initial_params, derivatives = st.session_state.app_state.deconvolver.auto_detect_peaks(
                         sensitivity=st.session_state.app_state.sensitivity,
-                        min_distance=st.session_state.app_state.min_distance
+                        min_distance=st.session_state.app_state.min_distance,
+                        method=st.session_state.app_state.peak_detection_method
                     )
                 st.session_state.app_state.peak_info = peak_info
                 st.session_state.app_state.derivatives = derivatives
@@ -2194,7 +3569,7 @@ elif st.session_state.app_state.current_step == 3:
                 slider_min = x_min_display
                 slider_max = x_max_display
             
-            # Calculate number of steps: min(200, n_points)
+            # Calculate number of steps
             n_points = len(deconv.x_linear)
             n_steps = min(200, n_points)
             
@@ -2259,7 +3634,8 @@ elif st.session_state.app_state.current_step == 3:
                                 if st.checkbox(f"Add peak {i+1}", key=f"residual_peak_{i}"):
                                     selected_to_add.append(p)
                             with col_info:
-                                st.write(f"X: {p['x_linear']:.3e}, Amp: {p['amp_est']:.3e}")
+                                sign = p.get('sign', 'positive')
+                                st.write(f"X: {p['x_linear']:.3e}, Amp: {p['amp_est']:.3e}, Sign: {sign}")
                         
                         if st.button("Add selected peaks", use_container_width=True):
                             for p in selected_to_add:
@@ -2273,10 +3649,98 @@ elif st.session_state.app_state.current_step == 3:
             
             st.markdown("---")
             
+            # AIC/BIC control button
+            if st.session_state.app_state.use_aic_bic_control:
+                if st.button("🧠 Optimize peak count with AIC/BIC", use_container_width=True):
+                    with st.spinner("Optimizing peak count..."):
+                        # Use AIC/BIC controller to find optimal number of peaks
+                        initial_params = st.session_state.app_state.initial_params
+                        n_peaks = len(initial_params) // (4 if st.session_state.app_state.model_type in ['pseudo_voigt', 'voigt'] else 3)
+                        
+                        # Create temporary fitter for evaluation
+                        fitter = GaussianFitter(
+                            model_type=st.session_state.app_state.model_type,
+                            baseline_method=st.session_state.app_state.baseline_method
+                        )
+                        
+                        # Evaluate different numbers of peaks
+                        best_params, best_n, aic_hist, bic_hist, count_hist = AICBICController.find_optimal_peak_count(
+                            st.session_state.app_state.deconvolver.x,
+                            st.session_state.app_state.deconvolver.y_norm,
+                            initial_params,
+                            max_peaks=min(n_peaks + 5, 30),
+                            model_type=st.session_state.app_state.model_type,
+                            threshold=st.session_state.app_state.aic_bic_threshold,
+                            method=st.session_state.app_state.fitting_method,
+                            maxfev=st.session_state.app_state.max_nfev
+                        )
+                        
+                        if aic_hist and bic_hist:
+                            # Update parameters
+                            st.session_state.app_state.initial_params = list(best_params)
+                            st.session_state.app_state.aic_history = aic_hist
+                            st.session_state.app_state.bic_history = bic_hist
+                            st.session_state.app_state.peak_count_history = count_hist
+                            
+                            st.success(f"Optimal peak count: {best_n} (was {n_peaks})")
+                            
+                            # Show AIC/BIC history
+                            fig, ax = plt.subplots(figsize=(8, 4))
+                            ax.plot(range(1, len(aic_hist) + 1), aic_hist, 'b-o', label='AIC')
+                            ax.plot(range(1, len(bic_hist) + 1), bic_hist, 'r-s', label='BIC')
+                            ax.set_xlabel('Number of peaks')
+                            ax.set_ylabel('Information Criterion')
+                            ax.set_title('AIC/BIC vs Number of Peaks')
+                            ax.legend()
+                            ax.grid(True, alpha=0.3)
+                            st.pyplot(fig)
+                            plt.close()
+                            
+                            # Update peak_info to match new parameters
+                            params_per_peak = 4 if st.session_state.app_state.model_type in ['pseudo_voigt', 'voigt'] else 3
+                            new_peak_info = []
+                            for i in range(best_n):
+                                base = i * params_per_peak
+                                amp = st.session_state.app_state.initial_params[base]
+                                cen = st.session_state.app_state.initial_params[base + 1]
+                                sigma = st.session_state.app_state.initial_params[base + 2]
+                                if params_per_peak == 4:
+                                    eta = st.session_state.app_state.initial_params[base + 3]
+                                else:
+                                    eta = 0.5
+                                
+                                # Find original Y
+                                if deconv.use_log_x:
+                                    x_linear = 10**cen
+                                else:
+                                    x_linear = cen
+                                idx = np.argmin(np.abs(deconv.x_sorted - x_linear))
+                                y_original = deconv.y_sorted[idx]
+                                
+                                new_peak_info.append({
+                                    'index': idx,
+                                    'x': cen,
+                                    'x_linear': x_linear,
+                                    'y': amp,
+                                    'y_original': y_original,
+                                    'amp_est': amp,
+                                    'cen_est': cen,
+                                    'sigma_est': sigma,
+                                    'dy': 0,
+                                    'd2y': 0,
+                                    'source': 'auto',
+                                    'method': 'aic_bic_optimized',
+                                    'eta_est': eta
+                                })
+                            
+                            st.session_state.app_state.peak_info = new_peak_info
+                            st.rerun()
+            
+            st.markdown("---")
+            
             if st.button("✅ Confirm Peaks", use_container_width=True):
                 with st.spinner("Preparing preview..."):
                     if st.session_state.app_state.preview_mode:
-                        # Just store params for later
                         st.session_state.app_state.current_step = 4
                         st.rerun()
                     else:
@@ -2300,7 +3764,6 @@ elif st.session_state.app_state.current_step == 3:
                         status_text.empty()
                         
                         if success:
-                            # Store last popt for future use
                             st.session_state.app_state.last_popt = st.session_state.app_state.deconvolver.popt
                             st.session_state.app_state.current_step = 4
                             st.rerun()
@@ -2337,9 +3800,12 @@ elif st.session_state.app_state.current_step == 3:
                 # Add legend explanation
                 st.caption("""
                 **Peak color legend:**
-                - 🟢 Green: Auto-detected peaks
-                - 🟠 Orange: Manually added peaks  
+                - 🟢 Green: Auto-detected peaks (method varies)
+                - 🟠 Orange: Manually added peaks
                 - 🔵 Blue: Peaks found by residuals analysis
+                - 🟣 Purple: Hybrid method
+                - 🟦 Cyan: Second derivative method
+                - 🟪 Magenta: CWT method
                 """)
             
             with tab2:
@@ -2368,14 +3834,33 @@ elif st.session_state.app_state.current_step == 3:
                 plt.close()
             
             with tab3:
-                # Create a table with peak information including source
+                # Create a table with peak information including source and method
                 data = []
                 for i, info in enumerate(st.session_state.app_state.peak_info):
                     source = info.get('source', 'auto')
+                    method = info.get('method', 'auto')
                     source_icon = "🟢" if source == 'auto' else "🟠" if source == 'manual' else "🔵"
+                    
+                    method_display = method
+                    if method == 'find_peaks':
+                        method_display = 'find_peaks'
+                    elif method == 'second_derivative':
+                        method_display = '2nd derivative'
+                    elif method == 'cwt':
+                        method_display = 'CWT'
+                    elif method == 'hybrid':
+                        method_display = 'Hybrid'
+                    elif method == 'residuals':
+                        method_display = 'Residuals'
+                    elif method == 'manual':
+                        method_display = 'Manual'
+                    elif method == 'aic_bic_optimized':
+                        method_display = 'AIC/BIC'
+                    
                     data.append({
                         'Peak': i + 1,
                         'Source': f"{source_icon} {source}",
+                        'Method': method_display,
                         'X Center': f"{info['x_linear']:.4e}",
                         'Y Amplitude': f"{info['y_original']:.4e}",
                         'Estimated Sigma': f"{info['sigma_est']:.4f}",
@@ -2400,6 +3885,19 @@ elif st.session_state.app_state.current_step == 3:
                     residual_count = sum(1 for p in st.session_state.app_state.peak_info if p.get('source', '') == 'residuals')
                     st.metric("From residuals", residual_count)
                 
+                # Show method breakdown
+                st.markdown("---")
+                st.subheader("Method Breakdown")
+                method_counts = {}
+                for p in st.session_state.app_state.peak_info:
+                    method = p.get('method', 'auto')
+                    method_counts[method] = method_counts.get(method, 0) + 1
+                
+                method_df = pd.DataFrame([
+                    {'Method': m, 'Count': c} for m, c in method_counts.items()
+                ])
+                st.dataframe(method_df, use_container_width=True)
+                
                 st.markdown("---")
                 st.subheader("Data Info")
                 col5, col6 = st.columns(2)
@@ -2407,6 +3905,17 @@ elif st.session_state.app_state.current_step == 3:
                     st.metric("X Range", f"{np.min(deconv.x_sorted):.2e} - {np.max(deconv.x_sorted):.2e}")
                 with col6:
                     st.metric("Y Range", f"{np.min(deconv.y_sorted):.2e} - {np.max(deconv.y_sorted):.2e}")
+                
+                # AIC/BIC history if available
+                if st.session_state.app_state.aic_history:
+                    st.markdown("---")
+                    st.subheader("AIC/BIC History")
+                    history_df = pd.DataFrame({
+                        'Peaks': st.session_state.app_state.peak_count_history,
+                        'AIC': st.session_state.app_state.aic_history,
+                        'BIC': st.session_state.app_state.bic_history
+                    })
+                    st.dataframe(history_df, use_container_width=True)
 
 
 # ==================== STEP 4: EDITING ====================
@@ -2433,6 +3942,8 @@ elif st.session_state.app_state.current_step == 4:
             if deconv.quality_metrics:
                 metrics = deconv.quality_metrics
                 st.info(f"R² = {metrics.get('R²', 0):.4f} | RMSE = {metrics.get('RMSE', 0):.2e}")
+                if 'AIC' in metrics:
+                    st.info(f"AIC = {metrics.get('AIC', 0):.1f} | BIC = {metrics.get('BIC', 0):.1f}")
             
             st.markdown("---")
             
@@ -2445,14 +3956,14 @@ elif st.session_state.app_state.current_step == 4:
                 # Display peak sources in selection dropdown
                 peak_options = {}
                 for c in deconv.components:
-                    # Determine source (simplified - we don't track source per component after fit)
                     source_info = ""
                     if hasattr(st.session_state.app_state, 'peak_info'):
                         for p in st.session_state.app_state.peak_info:
                             if abs(p['x_linear'] - c['cen_linear']) / max(p['x_linear'], c['cen_linear']) < 0.01:
                                 source = p.get('source', 'auto')
+                                method = p.get('method', 'auto')
                                 source_icon = "🟢" if source == 'auto' else "🟠" if source == 'manual' else "🔵"
-                                source_info = f" [{source_icon}]"
+                                source_info = f" [{source_icon} {method}]"
                                 break
                     peak_options[f"Peak {c['id']}{source_info}: center = {c['cen_linear']:.2e}, fraction = {c['fraction_percent']:.1f}%"] = c['id']
                 
@@ -2527,7 +4038,6 @@ elif st.session_state.app_state.current_step == 4:
                         status_text.empty()
                         
                         if success:
-                            # Store last popt for future use
                             st.session_state.app_state.last_popt = deconv.popt
                             st.success("Recalculation complete!")
                             st.rerun()
@@ -2717,6 +4227,21 @@ elif st.session_state.app_state.current_step == 5:
             with col_sum4:
                 avg_area = total_area / n_peaks if n_peaks > 0 else 0
                 st.metric("Average Area", f"{avg_area:.4e}")
+            
+            # AIC/BIC history if available
+            if deconv.aic_history:
+                st.markdown("---")
+                st.subheader("AIC/BIC Optimization History")
+                fig_hist, ax_hist = plt.subplots(figsize=(8, 4))
+                ax_hist.plot(deconv.peak_count_history, deconv.aic_history, 'b-o', label='AIC')
+                ax_hist.plot(deconv.peak_count_history, deconv.bic_history, 'r-s', label='BIC')
+                ax_hist.set_xlabel('Number of Peaks')
+                ax_hist.set_ylabel('Information Criterion')
+                ax_hist.set_title('AIC/BIC vs Number of Peaks')
+                ax_hist.legend()
+                ax_hist.grid(True, alpha=0.3)
+                st.pyplot(fig_hist)
+                plt.close()
         
         with tab2:
             st.subheader("Normalized View (Max Peak Intensity = 1)")
@@ -2747,8 +4272,22 @@ elif st.session_state.app_state.current_step == 5:
                 # Plot normalized components
                 colors = plt.cm.Set3(np.linspace(0, 1, len(deconv.components)))
                 for c, color in zip(deconv.components, colors):
-                    y_component_norm = GaussianModel.gaussian(x_dense_log, c['amp_norm'], 
-                                                            c['cen_log'], c['sigma_log']) 
+                    # Generate component using appropriate model
+                    if c.get('model_type', 'gaussian') == 'gaussian':
+                        y_component_norm = GaussianModel.gaussian(x_dense_log, c['amp_norm'], 
+                                                                 c['cen_log'], c['sigma_log']) 
+                    elif c.get('model_type', 'gaussian') == 'lorentzian':
+                        y_component_norm = GaussianModel.lorentzian(x_dense_log, c['amp_norm'], 
+                                                                   c['cen_log'], c['sigma_log'])
+                    elif c.get('model_type', 'gaussian') == 'pseudo_voigt':
+                        eta = c.get('eta', 0.5)
+                        y_component_norm = GaussianModel.pseudo_voigt(x_dense_log, c['amp_norm'], 
+                                                                     c['cen_log'], c['sigma_log'], eta)
+                    else:  # voigt
+                        gamma = c.get('gamma', c['sigma_log'] * 0.5)
+                        y_component_norm = GaussianModel.voigt(x_dense_log, c['amp_norm'], 
+                                                              c['cen_log'], c['sigma_log'], gamma)
+                    
                     y_component_norm = y_component_norm * deconv.y_max / max_amp
                     
                     # Fill under Gaussian
@@ -2764,12 +4303,27 @@ elif st.session_state.app_state.current_step == 5:
                     n_peaks = len(deconv.components)
                     peak_params = []
                     for c in deconv.components:
-                        peak_params.extend([c['amp_norm'], c['cen_log'], c['sigma_log']])
+                        if c.get('model_type', 'gaussian') in ['gaussian', 'lorentzian']:
+                            peak_params.extend([c['amp_norm'], c['cen_log'], c['sigma_log']])
+                        else:
+                            peak_params.extend([c['amp_norm'], c['cen_log'], c['sigma_log'], c.get('eta', 0.5)])
                     
-                    y_total_norm = GaussianModel.multi_gaussian_with_baseline(
-                        x_dense_log, n_peaks, peak_params, 
-                        deconv.baseline_params, deconv.baseline_method
-                    ) * deconv.y_max / max_amp
+                    if deconv.model_type == 'gaussian':
+                        y_total_norm = GaussianModel.multi_gaussian(x_dense_log, *peak_params) * deconv.y_max / max_amp
+                    elif deconv.model_type == 'lorentzian':
+                        y_total_norm = GaussianModel.multi_lorentzian(x_dense_log, *peak_params) * deconv.y_max / max_amp
+                    elif deconv.model_type == 'pseudo_voigt':
+                        y_total_norm = GaussianModel.multi_pseudo_voigt(x_dense_log, *peak_params) * deconv.y_max / max_amp
+                    else:
+                        y_total_norm = GaussianModel.multi_voigt(x_dense_log, *peak_params) * deconv.y_max / max_amp
+                    
+                    # Add baseline
+                    if deconv.baseline_method == 'constant':
+                        y_total_norm += deconv.baseline_params[0] * deconv.y_max / max_amp
+                    elif deconv.baseline_method == 'linear':
+                        y_total_norm += (deconv.baseline_params[0] + deconv.baseline_params[1] * x_dense_log) * deconv.y_max / max_amp
+                    elif deconv.baseline_method == 'quadratic':
+                        y_total_norm += (deconv.baseline_params[0] + deconv.baseline_params[1] * x_dense_log + deconv.baseline_params[2] * x_dense_log**2) * deconv.y_max / max_amp
                 else:
                     y_total_norm = GaussianModel.multi_gaussian(x_dense_log, *deconv.popt) * deconv.y_max / max_amp
                 
@@ -2790,7 +4344,8 @@ elif st.session_state.app_state.current_step == 5:
                 # Add quality metrics
                 if deconv.quality_metrics:
                     metrics_text = f"R² = {deconv.quality_metrics.get('R²', 0):.4f}\n"
-                    metrics_text += f"RMSE = {deconv.quality_metrics.get('RMSE', 0):.2e}"
+                    metrics_text += f"RMSE = {deconv.quality_metrics.get('RMSE', 0):.2e}\n"
+                    metrics_text += f"AIC = {deconv.quality_metrics.get('AIC', 0):.1f}"
                     ax_norm.text(0.02, 0.98, metrics_text, transform=ax_norm.transAxes,
                                 fontsize=10, verticalalignment='top',
                                 bbox=dict(boxstyle="round,pad=0.3", facecolor='white', alpha=0.8))
@@ -2816,10 +4371,25 @@ elif st.session_state.app_state.current_step == 5:
                 fig_comp_norm, ax_comp_norm = plt.subplots(figsize=(10, 6))
                 
                 # Plot all normalized components on the same axes without fill
+                max_amp = max([c['amp'] for c in deconv.components])
                 colors = plt.cm.Set3(np.linspace(0, 1, len(deconv.components)))
                 for c, color in zip(deconv.components, colors):
-                    y_component_norm = GaussianModel.gaussian(x_dense_log, c['amp_norm'], 
-                                                            c['cen_log'], c['sigma_log']) 
+                    # Generate component using appropriate model
+                    if c.get('model_type', 'gaussian') == 'gaussian':
+                        y_component_norm = GaussianModel.gaussian(x_dense_log, c['amp_norm'], 
+                                                                 c['cen_log'], c['sigma_log']) 
+                    elif c.get('model_type', 'gaussian') == 'lorentzian':
+                        y_component_norm = GaussianModel.lorentzian(x_dense_log, c['amp_norm'], 
+                                                                   c['cen_log'], c['sigma_log'])
+                    elif c.get('model_type', 'gaussian') == 'pseudo_voigt':
+                        eta = c.get('eta', 0.5)
+                        y_component_norm = GaussianModel.pseudo_voigt(x_dense_log, c['amp_norm'], 
+                                                                     c['cen_log'], c['sigma_log'], eta)
+                    else:  # voigt
+                        gamma = c.get('gamma', c['sigma_log'] * 0.5)
+                        y_component_norm = GaussianModel.voigt(x_dense_log, c['amp_norm'], 
+                                                              c['cen_log'], c['sigma_log'], gamma)
+                    
                     y_component_norm = y_component_norm * deconv.y_max / max_amp
                     
                     ax_comp_norm.plot(x_dense, y_component_norm, '-', color=color, linewidth=2,
@@ -2843,6 +4413,7 @@ elif st.session_state.app_state.current_step == 5:
             
             # Table of normalized values
             st.subheader("Normalized Parameters")
+            max_amp = max([c['amp'] for c in deconv.components])
             norm_data = []
             for c in deconv.components:
                 norm_data.append({
@@ -2850,7 +4421,8 @@ elif st.session_state.app_state.current_step == 5:
                     'Center': f"{c['cen_linear']:.4e}",
                     'Normalized Amplitude': f"{c['amp'] / max_amp:.4f}",
                     'Original Amplitude': f"{c['amp']:.4e}",
-                    'Fraction (%)': f"{c['fraction_percent']:.2f}"
+                    'Fraction (%)': f"{c['fraction_percent']:.2f}",
+                    'Model': c.get('model_type', 'gaussian')
                 })
             
             df_norm = pd.DataFrame(norm_data)
@@ -2862,7 +4434,7 @@ elif st.session_state.app_state.current_step == 5:
             # Main results table
             data = []
             for c in deconv.components:
-                data.append({
+                row = {
                     'Peak ID': c['id'],
                     'Center': c['cen_linear'],
                     'Center (log)': c['cen_log'],
@@ -2872,20 +4444,27 @@ elif st.session_state.app_state.current_step == 5:
                     'FWHM': c['fwhm'],
                     'Area': c['area'],
                     'Fraction': c['fraction'],
-                    'Fraction (%)': c['fraction_percent']
-                })
+                    'Fraction (%)': c['fraction_percent'],
+                    'Model': c.get('model_type', 'gaussian')
+                }
+                if 'eta' in c:
+                    row['Eta (Gauss/Lorentz)'] = c['eta']
+                if 'gamma' in c:
+                    row['Gamma (Voigt)'] = c['gamma']
+                data.append(row)
             
             df = pd.DataFrame(data)
             
             # Format for display
             display_df = df.copy()
             for col in ['Center', 'Amplitude', 'Area']:
-                display_df[col] = display_df[col].apply(lambda x: f"{x:.4e}")
-            display_df['Center (log)'] = display_df['Center (log)'].apply(lambda x: f"{x:.4f}")
-            display_df['Amplitude (norm)'] = display_df['Amplitude (norm)'].apply(lambda x: f"{x:.4f}")
-            display_df['Sigma (log)'] = display_df['Sigma (log)'].apply(lambda x: f"{x:.4f}")
-            display_df['FWHM'] = display_df['FWHM'].apply(lambda x: f"{x:.4f}")
-            display_df['Fraction (%)'] = display_df['Fraction (%)'].apply(lambda x: f"{x:.2f}")
+                if col in display_df.columns:
+                    display_df[col] = display_df[col].apply(lambda x: f"{x:.4e}")
+            for col in ['Center (log)', 'Sigma (log)', 'FWHM', 'Fraction (%)']:
+                if col in display_df.columns:
+                    display_df[col] = display_df[col].apply(lambda x: f"{x:.4f}")
+            if 'Amplitude (norm)' in display_df.columns:
+                display_df['Amplitude (norm)'] = display_df['Amplitude (norm)'].apply(lambda x: f"{x:.4f}")
             
             st.dataframe(display_df, use_container_width=True)
             
@@ -2954,7 +4533,10 @@ elif st.session_state.app_state.current_step == 5:
                         'FWHM': c['fwhm'],
                         'Area': c['area'],
                         'Fraction': c['fraction'],
-                        'Fraction_Percent': c['fraction_percent']
+                        'Fraction_Percent': c['fraction_percent'],
+                        'Model': c.get('model_type', 'gaussian'),
+                        'Eta': c.get('eta', None),
+                        'Gamma': c.get('gamma', None)
                     } for c in deconv.components])
                     
                     csv_peaks = df_peaks.to_csv(index=False)
@@ -2974,12 +4556,26 @@ elif st.session_state.app_state.current_step == 5:
                         n_peaks = len(deconv.components)
                         peak_params = []
                         for c in deconv.components:
-                            peak_params.extend([c['amp_norm'], c['cen_log'], c['sigma_log']])
+                            if c.get('model_type', 'gaussian') in ['gaussian', 'lorentzian']:
+                                peak_params.extend([c['amp_norm'], c['cen_log'], c['sigma_log']])
+                            else:
+                                peak_params.extend([c['amp_norm'], c['cen_log'], c['sigma_log'], c.get('eta', 0.5)])
                         
-                        fit_y_norm = GaussianModel.multi_gaussian_with_baseline(
-                            deconv.x, n_peaks, peak_params, 
-                            deconv.baseline_params, deconv.baseline_method
-                        )
+                        if deconv.model_type == 'gaussian':
+                            fit_y_norm = GaussianModel.multi_gaussian(deconv.x, *peak_params)
+                        elif deconv.model_type == 'lorentzian':
+                            fit_y_norm = GaussianModel.multi_lorentzian(deconv.x, *peak_params)
+                        elif deconv.model_type == 'pseudo_voigt':
+                            fit_y_norm = GaussianModel.multi_pseudo_voigt(deconv.x, *peak_params)
+                        else:
+                            fit_y_norm = GaussianModel.multi_voigt(deconv.x, *peak_params)
+                        
+                        if deconv.baseline_method == 'constant':
+                            fit_y_norm += deconv.baseline_params[0]
+                        elif deconv.baseline_method == 'linear':
+                            fit_y_norm += deconv.baseline_params[0] + deconv.baseline_params[1] * deconv.x
+                        elif deconv.baseline_method == 'quadratic':
+                            fit_y_norm += deconv.baseline_params[0] + deconv.baseline_params[1] * deconv.x + deconv.baseline_params[2] * deconv.x**2
                     else:
                         fit_y_norm = deconv.fit_y_norm
                     
@@ -3019,6 +4615,9 @@ X range: [{deconv.x_linear[0]:.2e}, {deconv.x_linear[-1]:.2e}]
 Logarithmic X scale: {deconv.use_log_x}
 Baseline method: {deconv.baseline_method}
 Smoothing level: {deconv.smoothing_level}
+Model type: {deconv.model_type}
+Peak detection method: {deconv.peak_detection_method}
+AIC/BIC control: {deconv.use_aic_bic_control}
 
 QUALITY METRICS:
 {"-"*40}
@@ -3027,6 +4626,7 @@ AIC: {deconv.quality_metrics.get('AIC', 0):.2f}
 BIC: {deconv.quality_metrics.get('BIC', 0):.2f}
 χ²: {deconv.quality_metrics.get('χ²', 0):.2e}
 RMSE: {deconv.quality_metrics.get('RMSE', 0):.2e}
+MAE: {deconv.quality_metrics.get('MAE', 0):.2e}
 
 """
                     if deconv.baseline_method != 'none' and deconv.baseline_params:
@@ -3039,11 +4639,16 @@ Parameters: {', '.join([f'{p:.4e}' for p in deconv.baseline_params])}
                     
                     report += f"""COMPONENTS (ORIGINAL SCALE):
 {"-"*80}
-ID    Center          Amplitude       FWHM        Area           Fraction(%)
+ID    Center          Amplitude       FWHM        Area           Fraction(%)  Model
 {"-"*80}"""
                     
                     for c in deconv.components:
-                        report += f"\n{c['id']:<4} {c['cen_linear']:<15.4e} {c['amp']:<15.4e} {c['fwhm']:<12.4f} {c['area']:<15.4e} {c['fraction_percent']:<10.2f}"
+                        model = c.get('model_type', 'gaussian')
+                        report += f"\n{c['id']:<4} {c['cen_linear']:<15.4e} {c['amp']:<15.4e} {c['fwhm']:<12.4f} {c['area']:<15.4e} {c['fraction_percent']:<10.2f} {model}"
+                        if 'eta' in c:
+                            report += f" (eta={c['eta']:.3f})"
+                        if 'gamma' in c:
+                            report += f" (gamma={c['gamma']:.3f})"
                     
                     report += f"""
 
@@ -3088,7 +4693,6 @@ Maximum amplitude (for normalization): {max_amp:.6e}
                         ax=ax
                     )
                     
-                    # Save to buffer
                     buf = io.BytesIO()
                     fig.savefig(buf, format='png', dpi=300, bbox_inches='tight')
                     buf.seek(0)
@@ -3116,8 +4720,21 @@ Maximum amplitude (for normalization): {max_amp:.6e}
                     
                     colors = plt.cm.Set3(np.linspace(0, 1, len(deconv.components)))
                     for c, color in zip(deconv.components, colors):
-                        y_component_norm = GaussianModel.gaussian(x_dense_log, c['amp_norm'], 
-                                                                c['cen_log'], c['sigma_log']) 
+                        if c.get('model_type', 'gaussian') == 'gaussian':
+                            y_component_norm = GaussianModel.gaussian(x_dense_log, c['amp_norm'], 
+                                                                     c['cen_log'], c['sigma_log']) 
+                        elif c.get('model_type', 'gaussian') == 'lorentzian':
+                            y_component_norm = GaussianModel.lorentzian(x_dense_log, c['amp_norm'], 
+                                                                       c['cen_log'], c['sigma_log'])
+                        elif c.get('model_type', 'gaussian') == 'pseudo_voigt':
+                            eta = c.get('eta', 0.5)
+                            y_component_norm = GaussianModel.pseudo_voigt(x_dense_log, c['amp_norm'], 
+                                                                         c['cen_log'], c['sigma_log'], eta)
+                        else:
+                            gamma = c.get('gamma', c['sigma_log'] * 0.5)
+                            y_component_norm = GaussianModel.voigt(x_dense_log, c['amp_norm'], 
+                                                                  c['cen_log'], c['sigma_log'], gamma)
+                        
                         y_component_norm = y_component_norm * deconv.y_max / max_amp
                         
                         ax_norm.fill_between(x_dense, 0, y_component_norm, 
