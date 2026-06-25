@@ -3822,7 +3822,7 @@ elif st.session_state.app_state.current_step == 3:
         with col_b:
             if st.button("🔍 Find Peaks", type="primary", use_container_width=True):
                 with st.spinner("Detecting peaks..."):
-                    peaks, peak_info, initial_params, derivatives = st.session_state.app_state.auto_detect_peaks(
+                    peaks, peak_info, initial_params, derivatives = st.session_state.app_state.deconvolver.auto_detect_peaks(
                         sensitivity=st.session_state.app_state.sensitivity,
                         min_distance=st.session_state.app_state.min_distance,
                         method=st.session_state.app_state.peak_detection_method
