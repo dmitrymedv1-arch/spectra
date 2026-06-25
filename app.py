@@ -3429,11 +3429,15 @@ elif st.session_state.app_state.current_step == 2:
         )
         
         # Subtract minimum intensity checkbox (moved here)
+        prev_subtract = st.session_state.app_state.subtract_minimum
         st.session_state.app_state.subtract_minimum = st.checkbox(
             "Subtract minimum intensity (shift spectrum to zero)",
             value=st.session_state.app_state.subtract_minimum,
             help="Subtract the minimum Y value from all data points. This shifts the spectrum baseline to zero."
         )
+        # Если состояние изменилось, обновить preview
+        if prev_subtract != st.session_state.app_state.subtract_minimum:
+            st.rerun()
         
         st.markdown("---")
         st.subheader("Range Selection")
@@ -3525,6 +3529,14 @@ elif st.session_state.app_state.current_step == 2:
                     end_idx,
                     st.session_state.app_state.use_log_x
                 )
+                
+                # Apply subtract minimum if enabled
+                if st.session_state.app_state.subtract_minimum:
+                    y_offset = np.min(y_range)
+                    y_range = y_range - y_offset
+                    st.session_state.app_state.y_offset = y_offset
+                else:
+                    st.session_state.app_state.y_offset = 0.0
                 
                 # Update raw data with selected range
                 st.session_state.app_state.raw_x = x_range
