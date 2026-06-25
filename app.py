@@ -90,9 +90,9 @@ class AppState:
     peak_count_history: List[int] = field(default_factory=list)  # История числа пиков
     # Новое поле для удаления пиков
     peaks_to_remove: List[int] = field(default_factory=list)  # Список ID пиков для удаления
-    # НОВОЕ ПОЛЕ ДЛЯ ВЫЧИТАНИЯ МИНИМУМА
+    # Новое поле для вычитания минимума
     subtract_minimum: bool = False  # Вычитать минимальную интенсивность
-    original_y_for_display: Optional[np.ndarray] = None  # Сохраняем оригинальные Y для отображения
+    y_offset: float = 0.0  # Величина вычитания минимума
 
 # Initialize session state with dataclass
 if 'app_state' not in st.session_state:
@@ -947,13 +947,13 @@ class DataParser:
         start_idx = max(0, min(start_idx, len(x) - 1))
         end_idx = max(0, min(end_idx, len(x) - 1))
         
-        # Ensure start_idx <= end_idx for consistent behavior
-        if start_idx > end_idx:
-            start_idx, end_idx = end_idx, start_idx
-        
         # Select by indices (continuous block of points)
-        mask = np.zeros(len(x), dtype=bool)
-        mask[start_idx:end_idx+1] = True
+        if start_idx <= end_idx:
+            mask = np.zeros(len(x), dtype=bool)
+            mask[start_idx:end_idx+1] = True
+        else:
+            mask = np.zeros(len(x), dtype=bool)
+            mask[end_idx:start_idx+1] = True
         
         return x[mask], y[mask]
 
@@ -1117,7 +1117,7 @@ class DataPreprocessor:
     
     def preprocess_for_fitting(self, x_linear, y_original, use_log_x, use_log_y, smoothing_level='none',
                                baseline_method='arpls', baseline_lam=1e5, baseline_p=0.01, 
-                               baseline_degree=1, baseline_niter=10):
+                               baseline_degree=1, baseline_niter=10, subtract_minimum=False):
         """Preprocess data for fitting with proper handling of edge cases"""
         # Sort by X to ensure monotonic increasing X
         sort_idx = np.argsort(x_linear)
@@ -1133,6 +1133,14 @@ class DataPreprocessor:
             y_for_fitting = np.maximum(y_sorted, 0)
         else:
             y_for_fitting = y_sorted
+        
+        # Вычитание минимума (если включено)
+        y_offset = 0.0
+        if subtract_minimum:
+            y_offset = np.min(y_for_fitting)
+            y_for_fitting = y_for_fitting - y_offset
+            if self.show_warnings:
+                warnings.warn(f"Subtracted minimum intensity: {y_offset:.4e}")
         
         # Коррекция фона
         if baseline_method != 'none':
@@ -1188,7 +1196,8 @@ class DataPreprocessor:
             'clipped_points': self.clipped_points,
             'small_values_warning': self.small_values_warning,
             'baseline_removed': self.baseline_removed,
-            'baseline_values': self.baseline_values
+            'baseline_values': self.baseline_values,
+            'y_offset': y_offset
         }
 
 
@@ -1884,62 +1893,6 @@ class SpectrumPlotter:
         
         return fig, ax
     
-    def plot_raw_data_with_range(self, x, y, use_log_x=False, use_log_y=False, 
-                                  start_idx=None, end_idx=None,
-                                  title="Raw Data with Range Selection", ax=None, figsize=(10, 6)):
-        """Plot raw data with highlighted range selection"""
-        if ax is None:
-            fig, ax = plt.subplots(figsize=figsize)
-        else:
-            fig = ax.figure
-        
-        # Apply scales
-        if use_log_x:
-            ax.set_xscale('log')
-        if use_log_y:
-            ax.set_yscale('log')
-        
-        # Plot all data
-        ax.plot(x, y, 'o-', markersize=3, linewidth=1, alpha=0.7, 
-                color='black', label='Full Data', zorder=1)
-        
-        # Highlight selected range if specified
-        if start_idx is not None and end_idx is not None:
-            # Ensure valid indices
-            start_idx = max(0, min(start_idx, len(x) - 1))
-            end_idx = max(0, min(end_idx, len(x) - 1))
-            if start_idx > end_idx:
-                start_idx, end_idx = end_idx, start_idx
-            
-            # Get X range for highlighting
-            x_min = x[start_idx]
-            x_max = x[end_idx]
-            
-            # Add shaded region for selected range
-            ax.axvspan(x_min, x_max, alpha=0.2, color='green', 
-                      label=f'Selected Range (indices {start_idx+1}-{end_idx+1})', zorder=0)
-            
-            # Plot selected data points in different color
-            ax.plot(x[start_idx:end_idx+1], y[start_idx:end_idx+1], 'o-', 
-                   markersize=4, linewidth=2, alpha=0.9, 
-                   color='red', label='Selected Range', zorder=2)
-        
-        # Labels and title
-        x_label = 'X' + (' (log scale)' if use_log_x else '')
-        y_label = 'Y' + (' (log scale)' if use_log_y else '')
-        ax.set_xlabel(x_label, fontsize=12, fontweight='bold')
-        ax.set_ylabel(y_label, fontsize=12, fontweight='bold')
-        ax.set_title(title, fontsize=14, fontweight='bold')
-        
-        # Legend and grid
-        ax.legend(loc='best', fontsize=10, frameon=True, edgecolor='black')
-        ax.grid(True, alpha=0.3, linestyle='--')
-        
-        if self.scientific_style:
-            self._apply_scientific_style(ax)
-        
-        return fig, ax
-    
     def plot_with_peaks(self, deconvolver, peak_info, y_smooth, 
                         title="Peak Detection", ax=None, figsize=(10, 6),
                         manual_peak_position=None, manual_peak_source=None,
@@ -2303,20 +2256,12 @@ class GaussianDeconvolver:
         self.baseline_iterations = baseline_iterations
         self.adaptive_smoothing_factor = adaptive_smoothing_factor
         self.subtract_minimum = subtract_minimum
+        self.y_offset = 0.0
         
         # Sort by X to ensure monotonic increasing X
         sort_idx = np.argsort(self.x_linear)
         self.x_linear = self.x_linear[sort_idx]
         self.y_original = self.y_original[sort_idx]
-        
-        # Apply subtract minimum if enabled
-        if self.subtract_minimum:
-            y_min = np.min(self.y_original)
-            self.y_original = self.y_original - y_min
-            # Store the subtraction value for reference
-            self.subtraction_value = y_min
-        else:
-            self.subtraction_value = 0
         
         # Store sorted original data for display
         self.x_sorted = self.x_linear.copy()
@@ -2326,7 +2271,8 @@ class GaussianDeconvolver:
         self.preprocessor = DataPreprocessor(clip_negative, show_warnings)
         preprocessed = self.preprocessor.preprocess_for_fitting(
             self.x_linear, self.y_original, use_log_x, use_log_y, smoothing_level,
-            baseline_method, baseline_lam, baseline_p, 1, baseline_iterations
+            baseline_method, baseline_lam, baseline_p, 1, baseline_iterations,
+            subtract_minimum
         )
         
         # Update with preprocessed data
@@ -2341,6 +2287,7 @@ class GaussianDeconvolver:
         self.small_values_warning = preprocessed['small_values_warning']
         self.baseline_removed = preprocessed['baseline_removed']
         self.baseline_values = preprocessed['baseline_values']
+        self.y_offset = preprocessed['y_offset']
         
         # Normalization - use 95th percentile instead of max for robustness
         self.y_max = np.percentile(self.y_for_fitting, 95) if np.any(self.y_for_fitting > 0) else 1.0
@@ -2659,67 +2606,31 @@ class GaussianDeconvolver:
         
         return missing_peaks, missing_params
     
-    def sort_peaks_by_position(self, peak_info, initial_params):
+    def sort_and_renumber_peaks(self, peak_info):
         """
-        Sort peaks by their X position (center) and reassign IDs.
-        
-        Returns sorted peak_info and initial_params in order of increasing X.
+        Sort peaks by X position and renumber them from 1 to N.
+        Returns sorted peak_info with updated indices.
         """
         if not peak_info:
-            return peak_info, initial_params
+            return peak_info
         
-        # Create list of (x_position, peak_info, params) tuples
-        params_per_peak = 4 if self.model_type in ['pseudo_voigt', 'voigt'] else 3
-        peaks_with_params = []
+        # Sort by x_linear (ascending)
+        sorted_peaks = sorted(peak_info, key=lambda p: p['x_linear'])
         
-        for i, info in enumerate(peak_info):
-            x_pos = info['x_linear']
-            # Extract parameters for this peak
-            start_idx = i * params_per_peak
-            end_idx = start_idx + params_per_peak
-            if end_idx <= len(initial_params):
-                peak_params = initial_params[start_idx:end_idx]
-            else:
-                # If parameters don't match, use defaults
-                if params_per_peak == 3:
-                    peak_params = [info['amp_est'], info['cen_est'], info['sigma_est']]
-                else:
-                    peak_params = [info['amp_est'], info['cen_est'], info['sigma_est'], info.get('eta_est', 0.5)]
-            peaks_with_params.append((x_pos, info, peak_params))
+        # Renumber (assign new IDs based on sorted position)
+        for i, peak in enumerate(sorted_peaks):
+            peak['id'] = i + 1
         
-        # Sort by X position
-        peaks_with_params.sort(key=lambda x: x[0])
-        
-        # Rebuild sorted lists with new IDs
-        sorted_peak_info = []
-        sorted_params = []
-        
-        for new_id, (_, info, params) in enumerate(peaks_with_params, 1):
-            # Update the info with new ID
-            info_copy = info.copy()
-            info_copy['id'] = new_id  # Store new ID for reference
-            sorted_peak_info.append(info_copy)
-            sorted_params.extend(params)
-        
-        return sorted_peak_info, sorted_params
+        return sorted_peaks
     
     def fit(self, initial_params=None, method='trf', maxfev=5000, 
-            fit_quality='balanced', last_popt=None, progress_callback=None,
-            sort_peaks=True):
+            fit_quality='balanced', last_popt=None, progress_callback=None):
         """Perform fitting with selected method and baseline"""
         if initial_params is None:
             _, _, initial_params, _ = self.auto_detect_peaks(method=self.peak_detection_method)
         
         if len(initial_params) == 0:
             return False
-        
-        # Sort peaks if requested and if we have peak_info
-        if sort_peaks and hasattr(st.session_state.app_state, 'peak_info') and st.session_state.app_state.peak_info:
-            sorted_info, sorted_params = self.sort_peaks_by_position(
-                st.session_state.app_state.peak_info, initial_params
-            )
-            st.session_state.app_state.peak_info = sorted_info
-            initial_params = sorted_params
         
         # Create fitter with selected parameters
         self.fitter = GaussianFitter(
@@ -3410,31 +3321,33 @@ if st.session_state.app_state.current_step == 1:
         )
         
         # File uploader for .txt files
-        st.markdown("---")
-        st.subheader("Or upload a file:")
         uploaded_file = st.file_uploader(
-            "Choose a .txt, .dat, or .csv file",
-            type=['txt', 'dat', 'csv'],
-            help="Upload a text file with two columns (x and y) separated by any whitespace or comma"
+            "Or upload a .txt file:",
+            type=['txt'],
+            accept_multiple_files=False,
+            help="Upload a text file with two columns (x y) separated by space, comma, or tab"
         )
         
+        # Handle file upload
         if uploaded_file is not None:
-            # Read the file
             try:
-                file_content = uploaded_file.getvalue().decode('utf-8')
-                st.text_area(
-                    "File content preview:",
-                    value=file_content[:1000] + ("..." if len(file_content) > 1000 else ""),
-                    height=150,
-                    disabled=True
-                )
+                file_content = uploaded_file.read().decode('utf-8')
+                # Display file content in text area
+                st.text_area("File content:", value=file_content, height=150, disabled=True)
                 
-                # Option to use uploaded file content
-                if st.button("📂 Use uploaded file data", type="primary"):
-                    data_text = file_content
-                    st.success("File content loaded into text area above!")
+                # Parse and load data automatically
+                x, y = DataParser.parse_text(file_content)
+                
+                if len(x) > 0:
+                    st.session_state.app_state.raw_x = x
+                    st.session_state.app_state.raw_y = y
+                    st.session_state.app_state.x_range_min = float(np.min(x))
+                    st.session_state.app_state.x_range_max = float(np.max(x))
+                    st.session_state.app_state.current_step = 2
+                    st.success(f"✅ File loaded successfully! {len(x)} data points found.")
                     st.rerun()
-                    
+                else:
+                    st.error("Could not parse data from file. Check the format.")
             except Exception as e:
                 st.error(f"Error reading file: {e}")
     
@@ -3446,27 +3359,15 @@ if st.session_state.app_state.current_step == 1:
             - Space
             - Comma
             - Tab
-            
-            **File formats:**
-            - .txt (text)
-            - .dat (data)
-            - .csv (comma separated)
-            
-            **Example:**
-            0.0, 1.0
-            0.1, 0.9
-            0.2, 0.8
             """
         )
         
-        if st.button("📂 Load Data", type="primary", use_container_width=True):
+        if st.button("📂 Load Data from Text", type="primary", use_container_width=True):
             x, y = DataParser.parse_text(data_text)
             
             if len(x) > 0:
                 st.session_state.app_state.raw_x = x
                 st.session_state.app_state.raw_y = y
-                # Store original data for reference
-                st.session_state.app_state.original_y_for_display = y.copy()
                 st.session_state.app_state.x_range_min = float(np.min(x))
                 st.session_state.app_state.x_range_max = float(np.max(x))
                 st.session_state.app_state.current_step = 2
@@ -3527,6 +3428,13 @@ elif st.session_state.app_state.current_step == 2:
             value=st.session_state.app_state.use_log_y
         )
         
+        # Subtract minimum intensity checkbox (moved here)
+        st.session_state.app_state.subtract_minimum = st.checkbox(
+            "Subtract minimum intensity (shift spectrum to zero)",
+            value=st.session_state.app_state.subtract_minimum,
+            help="Subtract the minimum Y value from all data points. This shifts the spectrum baseline to zero."
+        )
+        
         st.markdown("---")
         st.subheader("Range Selection")
         
@@ -3539,34 +3447,47 @@ elif st.session_state.app_state.current_step == 2:
         if st.session_state.app_state.point_range_end is None:
             st.session_state.app_state.point_range_end = n_points - 1
         
-        # Ensure start <= end
-        if st.session_state.app_state.point_range_start > st.session_state.app_state.point_range_end:
-            st.session_state.app_state.point_range_start, st.session_state.app_state.point_range_end = \
-                st.session_state.app_state.point_range_end, st.session_state.app_state.point_range_start
+        # Sort X values to ensure slider goes from min to max
+        sorted_x = np.sort(st.session_state.app_state.raw_x)
+        sorted_indices = np.argsort(st.session_state.app_state.raw_x)
+        
+        # Find indices of min and max X values
+        min_x_idx = np.argmin(st.session_state.app_state.raw_x)
+        max_x_idx = np.argmax(st.session_state.app_state.raw_x)
         
         # Create slider by point indices (1-based for user-friendly display)
-        # Always from smaller to larger
+        # Always from smaller X to larger X
+        if st.session_state.app_state.point_range_start <= st.session_state.app_state.point_range_end:
+            default_start = st.session_state.app_state.point_range_start + 1
+            default_end = st.session_state.app_state.point_range_end + 1
+        else:
+            default_start = st.session_state.app_state.point_range_end + 1
+            default_end = st.session_state.app_state.point_range_start + 1
+        
         point_range = st.slider(
-            "Select point range for analysis:",
+            "Select point range (by index, 1-based):",
             min_value=1,
             max_value=n_points,
-            value=(st.session_state.app_state.point_range_start + 1, 
-                   st.session_state.app_state.point_range_end + 1),
+            value=(default_start, default_end),
             step=1,
-            help="Select range by point index (1-based). This defines the region for peak detection and fitting."
+            help="Select range by point index (1-based). Always from smaller X to larger X."
         )
         
         # Store selected indices (convert to 0-based)
         start_idx = point_range[0] - 1
         end_idx = point_range[1] - 1
-        # Ensure start < end
+        
+        # Ensure start_idx <= end_idx
         if start_idx > end_idx:
             start_idx, end_idx = end_idx, start_idx
+        
+        # Update session state with corrected indices
         st.session_state.app_state.point_range_start = start_idx
         st.session_state.app_state.point_range_end = end_idx
         
-        # Get X values for display
-        x_selected = st.session_state.app_state.raw_x[start_idx:end_idx+1]
+        # Get X values for display (using sorted indices)
+        sorted_indices_range = sorted_indices[start_idx:end_idx+1]
+        x_selected = st.session_state.app_state.raw_x[sorted_indices_range]
         range_min_linear = float(np.min(x_selected))
         range_max_linear = float(np.max(x_selected))
         
@@ -3574,14 +3495,14 @@ elif st.session_state.app_state.current_step == 2:
         if st.session_state.app_state.use_log_x:
             log_min = np.log10(max(range_min_linear, 1e-12))
             log_max = np.log10(range_max_linear)
-            st.info(f"**Selected X range:** {range_min_linear:.3e} - {range_max_linear:.3e} (linear)\n"
-                   f"**log₁₀(X) range:** {log_min:.2f} - {log_max:.2f}")
+            st.info(f"X range: {range_min_linear:.3e} - {range_max_linear:.3e} (linear)\n"
+                   f"log₁₀(X) range: {log_min:.2f} - {log_max:.2f}")
         else:
-            st.info(f"**Selected X range:** {range_min_linear:.3e} - {range_max_linear:.3e}")
+            st.info(f"X range: {range_min_linear:.3e} - {range_max_linear:.3e}")
         
         # Show selected range statistics
         points_in_range = end_idx - start_idx + 1
-        st.info(f"**Points in selected range:** {points_in_range} / {n_points} (indices {start_idx+1}-{end_idx+1})")
+        st.info(f"Points in selected range: {points_in_range} / {n_points} (indices {start_idx+1}-{end_idx+1})")
         
         # Store the X range values for compatibility with downstream code
         st.session_state.app_state.x_range_min = range_min_linear
@@ -3613,23 +3534,82 @@ elif st.session_state.app_state.current_step == 2:
                 st.rerun()
     
     with col2:
-        st.subheader("Preview (Full Data with Range Highlighted):")
+        st.subheader("Preview:")
         
         plotter = SpectrumPlotter()
         fig, ax = plt.subplots(figsize=(8, 5))
         
-        # Use the new plot_raw_data_with_range method
-        # Show ALL data with highlighted range
-        fig, ax = plotter.plot_raw_data_with_range(
-            st.session_state.app_state.raw_x,
-            st.session_state.app_state.raw_y,
-            use_log_x=st.session_state.app_state.use_log_x,
-            use_log_y=st.session_state.app_state.use_log_y,
-            start_idx=st.session_state.app_state.point_range_start,
-            end_idx=st.session_state.app_state.point_range_end,
-            title=f"Full Data with Selected Range (indices {st.session_state.app_state.point_range_start+1}-{st.session_state.app_state.point_range_end+1})",
-            ax=ax
-        )
+        # Get full data for display (show ALL data, not cropped)
+        x_full = st.session_state.app_state.raw_x
+        y_full = st.session_state.app_state.raw_y
+        
+        # Apply subtract minimum if enabled (for preview)
+        if st.session_state.app_state.subtract_minimum:
+            y_offset = np.min(y_full)
+            y_full_display = y_full - y_offset
+            st.caption(f"⚠️ Minimum subtracted: {y_offset:.4e}")
+        else:
+            y_full_display = y_full
+        
+        # Plot full data
+        if st.session_state.app_state.use_log_x:
+            ax.set_xscale('log')
+        if st.session_state.app_state.use_log_y:
+            ax.set_yscale('log')
+        
+        ax.plot(x_full, y_full_display, 'o-', markersize=3, linewidth=1, alpha=0.7, 
+                color='black', label='All Data', zorder=1)
+        
+        # Highlight selected range with green shaded area and vertical lines
+        if start_idx is not None and end_idx is not None:
+            # Get selected range bounds
+            sorted_indices_full = np.argsort(x_full)
+            sorted_x_full = x_full[sorted_indices_full]
+            
+            # Find the X values at the selected range boundaries
+            selected_indices = sorted_indices_full[start_idx:end_idx+1]
+            if len(selected_indices) > 0:
+                x_min_sel = np.min(x_full[selected_indices])
+                x_max_sel = np.max(x_full[selected_indices])
+                
+                # Add green shaded area for selected range
+                y_min = np.min(y_full_display) if len(y_full_display) > 0 else 0
+                y_max = np.max(y_full_display) if len(y_full_display) > 0 else 1
+                y_range = y_max - y_min
+                y_top = y_max + y_range * 0.1
+                y_bottom = y_min - y_range * 0.1
+                
+                # Shaded area (green with transparency)
+                ax.axvspan(x_min_sel, x_max_sel, alpha=0.2, color='green', 
+                          label='Selected Range', zorder=0)
+                
+                # Vertical lines at boundaries
+                ax.axvline(x=x_min_sel, color='green', linestyle='--', 
+                          linewidth=2, alpha=0.8, label=f'Start: {x_min_sel:.3e}')
+                ax.axvline(x=x_max_sel, color='green', linestyle='--', 
+                          linewidth=2, alpha=0.8, label=f'End: {x_max_sel:.3e}')
+                
+                # Add text labels for boundaries
+                ax.text(x_min_sel, y_top, f'{x_min_sel:.3e}', 
+                       rotation=90, verticalalignment='top', 
+                       color='green', fontsize=8)
+                ax.text(x_max_sel, y_top, f'{x_max_sel:.3e}', 
+                       rotation=90, verticalalignment='top', 
+                       color='green', fontsize=8)
+        
+        # Labels and title
+        x_label = 'X' + (' (log scale)' if st.session_state.app_state.use_log_x else '')
+        y_label = 'Y' + (' (log scale)' if st.session_state.app_state.use_log_y else '')
+        if st.session_state.app_state.subtract_minimum:
+            y_label += ' (min subtracted)'
+        
+        ax.set_xlabel(x_label, fontsize=12, fontweight='bold')
+        ax.set_ylabel(y_label, fontsize=12, fontweight='bold')
+        ax.set_title('Data Preview with Selected Range Highlighted', fontsize=14, fontweight='bold')
+        
+        ax.legend(loc='best', fontsize=9, frameon=True, edgecolor='black')
+        ax.grid(True, alpha=0.3, linestyle='--')
+        plotter._apply_scientific_style(ax)
         
         st.pyplot(fig)
         plt.close()
@@ -3672,8 +3652,8 @@ elif st.session_state.app_state.current_step == 3:
             st.warning("Very small Y values detected. Log transformation may cause artifacts.")
         if st.session_state.app_state.deconvolver.baseline_removed:
             st.success(f"Baseline removed using {st.session_state.app_state.baseline_method} method")
-        if st.session_state.app_state.subtract_minimum:
-            st.info(f"Minimum intensity subtracted: {st.session_state.app_state.deconvolver.subtraction_value:.4e}")
+        if st.session_state.app_state.deconvolver.y_offset > 0:
+            st.info(f"Minimum intensity subtracted: {st.session_state.app_state.deconvolver.y_offset:.4e}")
     
     col1, col2 = st.columns([1, 2])
     
@@ -3698,30 +3678,12 @@ elif st.session_state.app_state.current_step == 3:
             step=1
         )
         
-        # НОВЫЙ ЧЕКБОКС ДЛЯ ВЫЧИТАНИЯ МИНИМУМА
-        st.markdown("---")
-        st.subheader("Data Preprocessing")
-        
-        subtract_minimum_changed = st.checkbox(
-            "Subtract minimum intensity (shift spectrum to zero)",
-            value=st.session_state.app_state.subtract_minimum,
-            help="Subtract the minimum Y value from all data points. This shifts the spectrum baseline to zero, which can improve fitting results."
-        )
-        
-        if subtract_minimum_changed != st.session_state.app_state.subtract_minimum:
-            st.session_state.app_state.subtract_minimum = subtract_minimum_changed
-            # Recreate deconvolver with new setting
-            st.session_state.app_state.deconvolver = None
-            st.rerun()
-        
         # Show current settings
-        st.markdown("---")
-        st.subheader("Current Settings")
         st.info(f"Method: {st.session_state.app_state.peak_detection_method}\n"
                 f"Model: {st.session_state.app_state.model_type}\n"
                 f"Smoothing: {st.session_state.app_state.smoothing_level}\n"
                 f"Baseline: {st.session_state.app_state.baseline_method}\n"
-                f"Subtract min: {'✅' if st.session_state.app_state.subtract_minimum else '❌'}")
+                f"Min subtracted: {'Yes' if st.session_state.app_state.subtract_minimum else 'No'}")
         
         col_a, col_b = st.columns(2)
         with col_a:
@@ -3891,11 +3853,9 @@ elif st.session_state.app_state.current_step == 3:
                             ax.set_title('AIC/BIC vs Number of Peaks')
                             ax.legend()
                             ax.grid(True, alpha=0.3)
-                            
-                            # Ensure integer ticks on x-axis
+                            # Ensure integer x-axis ticks
                             from matplotlib.ticker import MaxNLocator
                             ax.xaxis.set_major_locator(MaxNLocator(integer=True))
-                            
                             st.pyplot(fig)
                             plt.close()
                             
@@ -3952,16 +3912,26 @@ elif st.session_state.app_state.current_step == 3:
             
             st.markdown("---")
             
-            if st.button("✅ Confirm Peaks", type="primary", use_container_width=True):
+            if st.button("✅ Confirm Peaks", use_container_width=True):
                 with st.spinner("Preparing preview..."):
-                    # Sort peaks before fitting
+                    # Sort and renumber peaks before proceeding
                     if st.session_state.app_state.peak_info:
-                        sorted_info, sorted_params = st.session_state.app_state.deconvolver.sort_peaks_by_position(
-                            st.session_state.app_state.peak_info,
-                            st.session_state.app_state.initial_params
+                        sorted_peaks = st.session_state.app_state.deconvolver.sort_and_renumber_peaks(
+                            st.session_state.app_state.peak_info
                         )
-                        st.session_state.app_state.peak_info = sorted_info
-                        st.session_state.app_state.initial_params = sorted_params
+                        st.session_state.app_state.peak_info = sorted_peaks
+                        
+                        # Rebuild initial_params in the new order
+                        deconv = st.session_state.app_state.deconvolver
+                        params_per_peak = 4 if st.session_state.app_state.model_type in ['pseudo_voigt', 'voigt'] else 3
+                        new_initial_params = []
+                        for info in sorted_peaks:
+                            if params_per_peak == 3:
+                                new_initial_params.extend([info['amp_est'], info['cen_est'], info['sigma_est']])
+                            else:
+                                eta = info.get('eta_est', 0.5)
+                                new_initial_params.extend([info['amp_est'], info['cen_est'], info['sigma_est'], eta])
+                        st.session_state.app_state.initial_params = new_initial_params
                     
                     if st.session_state.app_state.preview_mode:
                         st.session_state.app_state.current_step = 4
@@ -3980,8 +3950,7 @@ elif st.session_state.app_state.current_step == 3:
                             method=st.session_state.app_state.fitting_method,
                             maxfev=st.session_state.app_state.max_nfev,
                             fit_quality=st.session_state.app_state.fit_quality,
-                            progress_callback=update_progress,
-                            sort_peaks=True
+                            progress_callback=update_progress
                         )
                         
                         progress_bar.empty()
@@ -4589,11 +4558,9 @@ elif st.session_state.app_state.current_step == 5:
                 ax_hist.set_title('AIC/BIC vs Number of Peaks')
                 ax_hist.legend()
                 ax_hist.grid(True, alpha=0.3)
-                
-                # Ensure integer ticks on x-axis
+                # Ensure integer x-axis ticks
                 from matplotlib.ticker import MaxNLocator
                 ax_hist.xaxis.set_major_locator(MaxNLocator(integer=True))
-                
                 st.pyplot(fig_hist)
                 plt.close()
         
@@ -4954,7 +4921,7 @@ Smoothing level: {deconv.smoothing_level}
 Model type: {deconv.model_type}
 Peak detection method: {deconv.peak_detection_method}
 AIC/BIC control: {deconv.use_aic_bic_control}
-Subtract minimum: {'Yes' if deconv.subtract_minimum else 'No'}
+Minimum subtracted: {'Yes' if deconv.y_offset > 0 else 'No'} (offset: {deconv.y_offset:.4e})
 
 QUALITY METRICS:
 {"-"*40}
