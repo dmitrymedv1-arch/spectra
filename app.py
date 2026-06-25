@@ -1977,7 +1977,7 @@ class SpectrumPlotter:
             fig = ax.figure
         
         # Apply scales
-        
+        if deconvolver.use_log_x:
             ax.set_xscale('log')
         if deconvolver.use_log_y:
             ax.set_yscale('log')
@@ -1987,18 +1987,13 @@ class SpectrumPlotter:
                 'o-', markersize=3, linewidth=1, alpha=0.7, 
                 label='Original Data', color='black', zorder=1)
         
-        # Plot smoothed data (converted back to original scale)
-        # Use the scaling factor to convert normalized smooth data to original scale
-        if deconvolver.use_log_y:
-            # For log Y, we need to handle it differently
-            y_smooth_original = 10**(y_smooth * deconvolver.y_max)
+        # Plot smoothed data
+        # y_smooth is normalized (0-1), convert back to original scale using y_max
+        if hasattr(deconvolver, 'y_max') and deconvolver.y_max > 0:
+            y_smooth_original = y_smooth * deconvolver.y_max
         else:
-            # Use the scale_to_original factor
-            if hasattr(deconvolver, 'scale_to_original'):
-                y_smooth_original = y_smooth * deconvolver.scale_to_original
-            else:
-                # Fallback: use y_max
-                y_smooth_original = y_smooth * deconvolver.y_max
+            # Fallback
+            y_smooth_original = y_smooth * np.max(deconvolver.y_sorted)
         
         ax.plot(deconvolver.x_sorted, y_smooth_original, 
                 'r-', linewidth=2, label='Smoothed', color='red', zorder=2)
