@@ -1001,17 +1001,16 @@ class DataPreprocessor:
         self.small_values_warning = False
         self.baseline_removed = False
         self.baseline_values = None
-        # Новые поля для отслеживания преобразований
         self.applied_transformations = []
         self.original_max_y = None
         self.preprocessed_max_y = None
+        self.y_after_baseline = None  # Новое поле для хранения данных после вычитания фона
     
     def smooth_data(self, x, y, method='savgol', level='none', x_log=False):
         """Smooth data with various methods and levels"""
         if level == 'none' or len(y) < 5:
             return y
         
-        # Determine window size based on level and data length
         n_points = len(y)
         if level == 'light':
             window = min(5, n_points - 1 if n_points % 2 == 0 else n_points)
@@ -1020,12 +1019,10 @@ class DataPreprocessor:
         elif level == 'strong':
             window = min(21, n_points - 1 if n_points % 2 == 0 else n_points)
         elif level == 'adaptive':
-            # Адаптивное сглаживание
             return AdaptiveSmoother.adaptive_savgol(y, base_window=5)
         else:
             return y
         
-        # Ensure window is odd
         if window % 2 == 0:
             window += 1
         
@@ -1042,68 +1039,39 @@ class DataPreprocessor:
             return y
     
     def remove_baseline_arpls(self, y, lam=1e5, p=0.01, niter=10):
-        """
-        Asymmetric Least Squares (arPLS) baseline correction.
-        Золотой стандарт для коррекции фона в рамановских спектрах.
-        
-        Parameters:
-        -----------
-        y : array_like
-            Входные данные
-        lam : float
-            Параметр гладкости (чем больше, тем более гладкий фон)
-        p : float
-            Параметр асимметрии (0.001-0.1, типично 0.01)
-        niter : int
-            Число итераций
-        
-        Returns:
-        --------
-        baseline : array_like
-            Оценка фона
-        """
+        """Asymmetric Least Squares (arPLS) baseline correction."""
         y = np.asarray(y, dtype=float)
         n = len(y)
         
-        # Если данные слишком короткие, используем простой метод
         if n < 10:
             return np.percentile(y, 5) * np.ones_like(y)
         
-        # Используем pybaselines если доступен
         if HAS_PYBASELINES:
             try:
                 baseline_fitter = Baseline(x_data=None)
-                # Используем arPLS метод из pybaselines
                 baseline, params = baseline_fitter.arpls(y, lam=lam, p=p, max_iter=niter)
                 return baseline
             except Exception as e:
                 if self.show_warnings:
                     warnings.warn(f"pybaselines.arpls failed: {e}, falling back to manual implementation")
         
-        # Ручная реализация arPLS
         try:
-            # Построение матрицы второй производной
-            from scipy.sparse import spdiags, diags, csr_matrix
+            from scipy.sparse import diags
             from scipy.sparse.linalg import spsolve
             
-            # Создаем матрицу D (вторая производная)
             D = diags([1, -2, 1], [0, 1, 2], shape=(n-2, n)).toarray()
             
-            # Итеративный процесс
             z = y.copy()
             for i in range(niter):
-                # Веса: больший вес для точек ниже фона
                 w = np.ones_like(y)
                 w[y > z] = p
                 w[y <= z] = 1 - p
                 
-                # Решаем систему (W + lam * D.T @ D) z = W @ y
                 W = np.diag(w)
                 A = W + lam * (D.T @ D)
                 try:
                     z = np.linalg.solve(A, W @ y)
                 except np.linalg.LinAlgError:
-                    # Если матрица сингулярна, используем псевдо-обратную
                     z = np.linalg.lstsq(A, W @ y, rcond=None)[0]
             
             return z
@@ -1111,7 +1079,6 @@ class DataPreprocessor:
         except Exception as e:
             if self.show_warnings:
                 warnings.warn(f"arPLS manual implementation failed: {e}")
-            # Fallback: простая медианная фильтрация
             window = min(21, n // 10 * 2 + 1)
             if window % 2 == 0:
                 window += 1
@@ -1119,26 +1086,16 @@ class DataPreprocessor:
             return median_filter(y, size=window)
     
     def remove_baseline_polynomial(self, x, y, degree=1):
-        """Полиномиальная коррекция фона"""
+        """Polynomial baseline correction"""
         if degree < 0:
             return y, np.zeros_like(y)
         
-        # Подгоняем полином
         coeffs = np.polyfit(x, y, degree)
         baseline = np.polyval(coeffs, x)
         return y - baseline, baseline
     
     def remove_baseline(self, x, y, method='arpls', degree=1, lam=1e5, p=0.01, niter=10):
-        """
-        Коррекция фона выбранным методом.
-        
-        Methods:
-        --------
-        'none' : Без коррекции
-        'polynomial' : Полиномиальная коррекция
-        'arpls' : Asymmetric Least Squares
-        'constant' : Постоянный фон (медиана)
-        """
+        """Baseline correction with selected method"""
         if method == 'none':
             return y, np.zeros_like(y)
         elif method == 'polynomial':
@@ -1156,16 +1113,13 @@ class DataPreprocessor:
                                baseline_method='arpls', baseline_lam=1e5, baseline_p=0.01, 
                                baseline_degree=1, baseline_niter=10):
         """Preprocess data for fitting with proper handling of edge cases"""
-        # Sort by X to ensure monotonic increasing X
         sort_idx = np.argsort(x_linear)
         x_sorted = x_linear[sort_idx]
         y_sorted = y_original[sort_idx]
         
-        # Сохраняем информацию о преобразованиях
         self.applied_transformations = []
         self.original_max_y = np.max(y_sorted) if len(y_sorted) > 0 else 1.0
         
-        # Handle negative values
         if self.clip_negative:
             negative_mask = y_sorted < 0
             self.clipped_points = np.sum(negative_mask)
@@ -1176,7 +1130,6 @@ class DataPreprocessor:
         else:
             y_for_fitting = y_sorted
         
-        # Коррекция фона
         if baseline_method != 'none':
             y_corrected, baseline = self.remove_baseline(
                 x_sorted, y_for_fitting, baseline_method, 
@@ -1185,29 +1138,27 @@ class DataPreprocessor:
             self.baseline_removed = True
             self.baseline_values = baseline
             y_for_fitting = y_corrected
+            self.y_after_baseline = y_corrected.copy()  # Сохраняем данные после вычитания фона
             self.applied_transformations.append(f'baseline_{baseline_method}')
         else:
             self.baseline_removed = False
             self.baseline_values = None
+            self.y_after_baseline = y_for_fitting.copy()
         
-        # Apply smoothing if requested
         if smoothing_level != 'none':
             y_for_fitting = self.smooth_data(x_sorted, y_for_fitting, 'savgol', smoothing_level, use_log_x)
             self.applied_transformations.append(f'smoothing_{smoothing_level}')
         
-        # Сохраняем максимум после предобработки
+        # Используем максимум ПОСЛЕ вычитания фона для нормализации
         self.preprocessed_max_y = np.max(y_for_fitting) if np.any(y_for_fitting > 0) else 1.0
         
-        # Small epsilon for log transformations
         eps = np.finfo(float).eps
         
-        # Check for very small values when using log
         if use_log_y and np.any(y_for_fitting < eps * 100):
             self.small_values_warning = True
             if self.show_warnings:
                 warnings.warn("Very small Y values detected. Log transformation may cause artifacts.")
         
-        # Apply logarithmic transformations
         if use_log_x:
             x_pos = np.maximum(x_sorted, eps)
             x = np.log10(x_pos)
@@ -1231,6 +1182,7 @@ class DataPreprocessor:
             'x': x,
             'y': y,
             'y_for_fitting': y_for_fitting,
+            'y_after_baseline': self.y_after_baseline,  # Добавляем в возврат
             'x_label': x_label,
             'y_label': y_label,
             'clipped_points': self.clipped_points,
@@ -1241,7 +1193,6 @@ class DataPreprocessor:
             'preprocessed_max_y': self.preprocessed_max_y,
             'applied_transformations': self.applied_transformations
         }
-
 
 class DerivativeAnalyzer:
     """Analysis of first and second derivatives for peak detection"""
@@ -1612,8 +1563,8 @@ class GaussianFitter:
         self.aic_history = []
         self.bic_history = []
         self.peak_count_history = []
+        self.fit_y_norm = None  # Новое поле для хранения результата фита
         
-        # Set tolerances based on quality
         if fit_quality == 'fast':
             self.xtol = 1e-3
             self.ftol = 1e-3
@@ -1622,7 +1573,7 @@ class GaussianFitter:
             self.xtol = 1e-5
             self.ftol = 1e-5
             self.gtol = 1e-5
-        else:  # precise
+        else:
             self.xtol = 1e-8
             self.ftol = 1e-8
             self.gtol = 1e-8
@@ -1652,35 +1603,16 @@ class GaussianFitter:
     def get_params_per_peak(self):
         """Get number of parameters per peak for current model"""
         if self.model_type in ['gaussian', 'lorentzian']:
-            return 3  # amp, cen, sigma/gamma
-        else:  # pseudo_voigt, voigt
-            return 4  # amp, cen, sigma, eta/gamma
+            return 3
+        else:
+            return 4
     
     def fit(self, x, y_norm, initial_peak_params, y_max, normalization_factor=1.0,
             progress_callback=None, fixed_params=None):
-        """Perform fitting with progress tracking
-        
-        Parameters:
-        -----------
-        x : array_like
-            X coordinates (in fitting space)
-        y_norm : array_like
-            Normalized Y data (0-1 scale)
-        initial_peak_params : list
-            Initial parameters for peaks (normalized)
-        y_max : float
-            Maximum value of y_norm (for scaling)
-        normalization_factor : float
-            Factor to convert from normalized to original scale
-        progress_callback : callable
-            Progress callback function
-        fixed_params : list
-            Fixed parameters (not used currently)
-        """
+        """Perform fitting with progress tracking"""
         n_peaks = len(initial_peak_params) // self.get_params_per_peak()
         n_baseline = self.get_n_baseline_params()
         
-        # Use last good parameters if available
         if self.last_popt is not None:
             expected_len = n_peaks * self.get_params_per_peak() + n_baseline
             if len(self.last_popt) == expected_len:
@@ -1711,10 +1643,8 @@ class GaussianFitter:
         if len(initial_params) == 0:
             return False, None, None, None
         
-        # Create bounds
         lower_bounds, upper_bounds = self._create_bounds(x, y_norm, n_peaks, n_baseline)
         
-        # Ensure initial_params are within bounds
         for i in range(len(initial_params)):
             initial_params[i] = np.clip(initial_params[i], lower_bounds[i], upper_bounds[i])
         
@@ -1722,10 +1652,8 @@ class GaussianFitter:
             if progress_callback:
                 progress_callback(0.3, f"Initializing {self.model_type} fit...")
             
-            # Get the model function
             model_func = self.get_model_func(n_peaks)
             
-            # Perform fit
             popt, pcov = curve_fit(
                 model_func,
                 x,
@@ -1742,14 +1670,14 @@ class GaussianFitter:
             if progress_callback:
                 progress_callback(0.8, "Calculating components...")
             
+            # Вычисляем полный фит в нормализованном масштабе
             fit_y_norm = model_func(x, *popt)
+            self.fit_y_norm = fit_y_norm  # Сохраняем для использования
             
-            # Extract peak parameters
             params_per_peak = self.get_params_per_peak()
             peak_params = popt[:n_peaks * params_per_peak]
             baseline_params = popt[n_peaks * params_per_peak:] if n_baseline > 0 else []
             
-            # Extract components
             components = []
             for i in range(n_peaks):
                 base_idx = i * params_per_peak
@@ -1757,42 +1685,38 @@ class GaussianFitter:
                 cen = peak_params[base_idx + 1]
                 sigma = abs(peak_params[base_idx + 2])
                 
-                # Store amplitude in normalized form
                 amp_norm_scaled = amp_norm
                 
-                # Get eta for pseudo_voigt or gamma for voigt
                 eta = 0.5
                 gamma = sigma * 0.5
                 if params_per_peak == 4:
-                    eta = np.clip(peak_params[base_idx + 3], 0, 1) if self.model_type == 'pseudo_voigt' else 0.5
-                    gamma = abs(peak_params[base_idx + 3]) if self.model_type == 'voigt' else sigma * 0.5
+                    if self.model_type == 'pseudo_voigt':
+                        eta = np.clip(peak_params[base_idx + 3], 0, 1)
+                    else:
+                        gamma = abs(peak_params[base_idx + 3])
                 
-                # Calculate area and FWHM in normalized space
                 area_norm = GaussianModel.calculate_area(amp_norm, sigma, self.model_type, eta)
                 fwhm = GaussianModel.calculate_fwhm(sigma, self.model_type, eta)
                 
-                # Generate component curve (normalized)
                 if self.model_type == 'gaussian':
                     component_y_norm = GaussianModel.gaussian(x, amp_norm, cen, sigma)
                 elif self.model_type == 'lorentzian':
                     component_y_norm = GaussianModel.lorentzian(x, amp_norm, cen, sigma)
                 elif self.model_type == 'pseudo_voigt':
                     component_y_norm = GaussianModel.pseudo_voigt(x, amp_norm, cen, sigma, eta)
-                else:  # voigt
+                else:
                     component_y_norm = GaussianModel.voigt(x, amp_norm, cen, sigma, gamma)
                 
-                # Calculate center in linear space
                 if hasattr(x, 'min') and hasattr(x, 'max'):
                     cen_linear = 10**cen if np.any(x < 0) else cen
                 else:
                     cen_linear = cen
                 
-                # Store component with normalized amplitude
                 components.append({
                     'id': i + 1,
                     'amp_norm': amp_norm,
                     'amp_norm_scaled': amp_norm_scaled,
-                    'amp_original': amp_norm * normalization_factor,  # Original scale
+                    'amp_original': amp_norm * normalization_factor,
                     'cen_log': cen,
                     'cen_linear': cen_linear,
                     'sigma_log': sigma,
@@ -1807,18 +1731,15 @@ class GaussianFitter:
                     'normalization_factor': normalization_factor
                 })
             
-            # Calculate fractions
             total_area_norm = sum([c['area_norm'] for c in components])
             for c in components:
                 c['fraction'] = c['area_norm'] / total_area_norm if total_area_norm > 0 else 0
                 c['fraction_percent'] = c['fraction'] * 100
             
-            # Apply AIC/BIC control if enabled
             if self.use_aic_bic_control and len(components) > 1:
                 if progress_callback:
                     progress_callback(0.85, "Evaluating AIC/BIC...")
                 
-                # Calculate metrics for current fit
                 n_points = len(x)
                 rss = np.sum((y_norm - fit_y_norm) ** 2)
                 k = len(popt)
@@ -1828,7 +1749,6 @@ class GaussianFitter:
                 self.bic_history.append(bic)
                 self.peak_count_history.append(len(components))
                 
-                # Store for future reference
                 self._last_aic = aic
                 self._last_bic = bic
                 self._last_n_peaks = len(components)
@@ -1852,39 +1772,31 @@ class GaussianFitter:
         
         params_per_peak = self.get_params_per_peak()
         
-        # Peak bounds
         for i in range(n_peaks):
-            # amp: 0 to 2*max
             lower_bounds.append(0)
             upper_bounds.append(2 * np.max(y_norm))
             
-            # cen: within data range
             lower_bounds.append(np.min(x))
             upper_bounds.append(np.max(x))
             
-            # sigma/gamma: positive, within reasonable range
             lower_bounds.append(x_range * 0.001)
             upper_bounds.append(x_range * 0.5)
             
-            # Additional parameters for pseudo_voigt or voigt
             if params_per_peak == 4:
                 if self.model_type == 'pseudo_voigt':
-                    # eta: 0 to 1
                     lower_bounds.append(0)
                     upper_bounds.append(1)
-                else:  # voigt
-                    # gamma: positive
+                else:
                     lower_bounds.append(x_range * 0.001)
                     upper_bounds.append(x_range * 0.5)
         
-        # Baseline bounds
-        if n_baseline >= 1:  # constant
+        if n_baseline >= 1:
             lower_bounds.append(-np.max(y_norm))
             upper_bounds.append(np.max(y_norm))
-        if n_baseline >= 2:  # linear term
+        if n_baseline >= 2:
             lower_bounds.append(-x_range)
             upper_bounds.append(x_range)
-        if n_baseline >= 3:  # quadratic term
+        if n_baseline >= 3:
             lower_bounds.append(-x_range**2)
             upper_bounds.append(x_range**2)
         
@@ -1903,11 +1815,9 @@ class GaussianFitter:
             else:
                 baseline_params = [0, 0, 0]
         
-        # Calculate fit using appropriate model
         model_func = self.get_model_func(n_peaks)
         fit_y_norm = model_func(x, *peak_params)
         
-        # Add baseline if provided
         if baseline_params and n_baseline > 0:
             if self.baseline_method == 'constant':
                 fit_y_norm += baseline_params[0]
@@ -1987,12 +1897,10 @@ class SpectrumPlotter:
                 'o-', markersize=3, linewidth=1, alpha=0.7, 
                 label='Original Data', color='black', zorder=1)
         
-        # Plot smoothed data
-        # y_smooth is normalized (0-1), convert back to original scale using y_max
-        if hasattr(deconvolver, 'y_max') and deconvolver.y_max > 0:
-            y_smooth_original = y_smooth * deconvolver.y_max
+        # Plot smoothed data - используем исходный масштаб
+        if hasattr(deconvolver, 'scale_to_original'):
+            y_smooth_original = y_smooth * deconvolver.scale_to_original
         else:
-            # Fallback
             y_smooth_original = y_smooth * np.max(deconvolver.y_sorted)
         
         ax.plot(deconvolver.x_sorted, y_smooth_original, 
@@ -2014,17 +1922,14 @@ class SpectrumPlotter:
             source = info.get('source', 'auto')
             color = source_colors.get(source, 'green')
             
-            # Check if this peak is marked for removal
             is_marked_for_removal = (i + 1) in peaks_to_remove if peaks_to_remove else False
             
             if is_marked_for_removal:
-                # Red color for marked peaks
                 marker_color = 'darkred'
                 facecolor = 'red'
                 marker_size = 12
-                marker_style = 's'  # Square for marked peaks
+                marker_style = 's'
             else:
-                # Определяем цвета в зависимости от источника
                 if source == 'auto':
                     marker_color = 'darkred'
                     facecolor = 'lime'
@@ -2051,7 +1956,6 @@ class SpectrumPlotter:
                     'hybrid': 'purple'
                 }
                 facecolor = method_colors.get(method, 'lime')
-                # Карта соответствия цветов для темных оттенков
                 dark_color_map = {
                     'green': 'darkgreen',
                     'cyan': 'darkcyan',
@@ -2066,7 +1970,6 @@ class SpectrumPlotter:
                     marker_style, markersize=marker_size, markeredgecolor=marker_color, 
                     markerfacecolor=facecolor, zorder=3)
             
-            # Add label with strikethrough for marked peaks
             label_text = f'{i+1}'
             if is_marked_for_removal:
                 label_text = f'✕{i+1}'
@@ -2080,20 +1983,16 @@ class SpectrumPlotter:
         
         # Show manual peak position indicator if provided
         if manual_peak_position is not None:
-            # Find Y value at this position
             idx = np.argmin(np.abs(deconvolver.x_sorted - manual_peak_position))
             y_at_position = deconvolver.y_sorted[idx]
             
-            # Draw vertical line
             ax.axvline(x=manual_peak_position, color='red', linestyle='--', 
                       linewidth=1.5, alpha=0.7, label='Selected position')
             
-            # Draw red dot at the position
             ax.plot(manual_peak_position, y_at_position, 'ro', 
                    markersize=10, markeredgecolor='darkred', 
                    markerfacecolor='red', zorder=5)
             
-            # Add annotation
             ax.annotate(f'X: {manual_peak_position:.3e}\nY: {y_at_position:.3e}',
                        xy=(manual_peak_position, y_at_position),
                        xytext=(10, 10), textcoords='offset points',
@@ -2157,19 +2056,8 @@ class SpectrumPlotter:
                                   np.max(deconvolver.x_linear), 2000)
             x_dense_log = x_dense
         
-        # Determine scaling factor to original data
-        if hasattr(deconvolver, 'scale_to_original'):
-            scale_factor = deconvolver.scale_to_original
-        else:
-            # Fallback: try to compute from data
-            if deconvolver.y_original is not None and len(deconvolver.y_original) > 0:
-                original_max = np.max(deconvolver.y_original)
-                if original_max > 0 and deconvolver.y_norm is not None and np.max(deconvolver.y_norm) > 0:
-                    scale_factor = original_max / np.max(deconvolver.y_norm)
-                else:
-                    scale_factor = deconvolver.y_max
-            else:
-                scale_factor = deconvolver.y_max
+        # Get scale factor for converting from normalized to original scale
+        scale_factor = deconvolver.scale_to_original
         
         # Plot components with proper scaling
         if show_components and deconvolver.components:
@@ -2192,20 +2080,17 @@ class SpectrumPlotter:
                                                            c['cen_log'], c['sigma_log'], gamma)
                 
                 # Scale to original data scale
-                if deconvolver.use_log_y:
-                    y_component = (10 ** (y_component_norm * scale_factor)) if np.any(y_component_norm > 0) else y_component_norm * scale_factor
-                else:
-                    y_component = y_component_norm * scale_factor
+                y_component = y_component_norm * scale_factor
                 
                 # Ensure we don't have negative values for log scale
                 if deconvolver.use_log_y and np.any(y_component < 0):
                     y_component = np.maximum(y_component, 1e-12)
                 
-                # Fill under Gaussian - используем x_dense (не x_dense_log!)
+                # Fill under Gaussian
                 ax.fill_between(x_dense, 0, y_component, 
                                 color=color, alpha=0.3, linewidth=0)
                 
-                # Plot line - тоже используем x_dense
+                # Plot line
                 ax.plot(x_dense, y_component, '-', color=color, linewidth=2,
                        label=f'Peak {c["id"]}: {c["fraction_percent"]:.1f}%', zorder=2)
         
@@ -2229,29 +2114,19 @@ class SpectrumPlotter:
         
         # Plot total fit
         if preview_mode and preview_fit is not None:
-            if deconvolver.use_log_y:
-                y_total = (10 ** (preview_fit * scale_factor)) if np.any(preview_fit > 0) else preview_fit * scale_factor
-            else:
-                y_total = preview_fit * scale_factor
+            y_total = preview_fit * scale_factor
+            if deconvolver.use_log_y and np.any(y_total < 0):
+                y_total = np.maximum(y_total, 1e-12)
             ax.plot(x_dense, y_total, 'b--', linewidth=2, 
                    label='Preview (no fit)', zorder=3, alpha=0.7)
-        elif deconvolver.fit_y_norm is not None:
+        elif deconvolver.fit_y_original is not None:
+            # Используем готовый фит в исходном масштабе
             from scipy.interpolate import interp1d
             
-            # Create interpolation function
-            fit_interp = interp1d(deconvolver.x, deconvolver.fit_y_norm, 
+            fit_interp = interp1d(deconvolver.x, deconvolver.fit_y_original, 
                                   kind='linear', fill_value='extrapolate')
+            y_total = fit_interp(x_dense_log)
             
-            # Compute values on dense grid
-            y_total_norm = fit_interp(x_dense_log)
-            
-            # Scale to original data scale
-            if deconvolver.use_log_y:
-                y_total = (10 ** (y_total_norm * scale_factor)) if np.any(y_total_norm > 0) else y_total_norm * scale_factor
-            else:
-                y_total = y_total_norm * scale_factor
-            
-            # Ensure we don't have negative values for log scale
             if deconvolver.use_log_y and np.any(y_total < 0):
                 y_total = np.maximum(y_total, 1e-12)
             
@@ -2402,6 +2277,7 @@ class GaussianDeconvolver:
         self.x = preprocessed['x']
         self.y = preprocessed['y']
         self.y_for_fitting = preprocessed['y_for_fitting']
+        self.y_after_baseline = preprocessed.get('y_after_baseline', self.y_for_fitting.copy())  # Данные после вычитания фона
         self.x_label = preprocessed['x_label']
         self.y_label = preprocessed['y_label']
         self.clipped_points = preprocessed['clipped_points']
@@ -2411,16 +2287,17 @@ class GaussianDeconvolver:
         self.preprocessed_max_y = preprocessed.get('preprocessed_max_y', 1.0)
         self.applied_transformations = preprocessed.get('applied_transformations', [])
         
-        # Calculate scaling factor from normalized to original scale
-        # Use the maximum of y_original (original data) and preprocessed data
+        # Вычисляем коэффициент масштабирования для перевода из рабочего масштаба в исходный
+        # Рабочий масштаб - это y_after_baseline (данные после вычитания фона)
+        # Исходный масштаб - это y_original (исходные данные)
         if self.preprocessed_max_y > 0 and self.original_max_y > 0:
             self.scale_to_original = self.original_max_y / self.preprocessed_max_y
         else:
             self.scale_to_original = 1.0
         
-        # For fitting, we normalize using the preprocessed max
+        # Для фитинга используем нормализованные данные
+        # Нормализуем на максимум данных ПОСЛЕ вычитания фона
         if self.preprocessed_max_y > 0:
-            # Use the preprocessed max for normalization to keep y_norm in 0-1 range
             self.y_max = self.preprocessed_max_y
             self.y_norm = self.y / self.y_max
         else:
@@ -2430,6 +2307,7 @@ class GaussianDeconvolver:
         # Results containers
         self.components = []
         self.fit_y_norm = None
+        self.fit_y_original = None  # Фит в исходном масштабе
         self.popt = None
         self.baseline_params = None
         self.quality_metrics = {}
@@ -2451,9 +2329,8 @@ class GaussianDeconvolver:
     
     def get_scaling_factor(self, target='original'):
         """
-        Возвращает коэффициент масштабирования для перехода 
-        от нормализованных данных к целевому масштабу.
-        target: 'original' - к исходным данным, 'preprocessed' - к предобработанным
+        Returns scaling factor to convert from normalized data to target scale.
+        target: 'original' - to original data, 'preprocessed' - to preprocessed data
         """
         if target == 'original':
             return self.scale_to_original
@@ -2463,16 +2340,7 @@ class GaussianDeconvolver:
             return self.scale_to_original
     
     def auto_detect_peaks(self, sensitivity=0.03, min_distance=5, method='hybrid'):
-        """
-        Automatic peak detection using selected method.
-        
-        Methods:
-        - 'hybrid': Combination of find_peaks, second derivative, and CWT
-        - 'find_peaks': SciPy find_peaks with prominence
-        - 'second_derivative': Second derivative method
-        - 'cwt': Continuous Wavelet Transform
-        """
-        # Smoothing for peak detection
+        """Automatic peak detection using selected method."""
         if self.smoothing_level != 'none':
             y_smooth = self.preprocessor.smooth_data(
                 self.x, self.y_norm, 'savgol', self.smoothing_level, self.use_log_x
@@ -2480,7 +2348,6 @@ class GaussianDeconvolver:
         else:
             y_smooth = self.y_norm
         
-        # If adaptive smoothing is enabled, use it
         if self.smoothing_level == 'adaptive':
             y_smooth = AdaptiveSmoother.adaptive_savgol(self.y_norm, base_window=5)
         
@@ -2533,12 +2400,10 @@ class GaussianDeconvolver:
                 peaks = []
                 peak_details = []
         else:
-            # Default to hybrid
             peaks, peak_details = HybridPeakFinder.find_peaks_hybrid(
                 self.x, y_smooth, sensitivity, min_distance
             )
         
-        # Estimate parameters
         peak_info = []
         initial_params = []
         
@@ -2546,21 +2411,17 @@ class GaussianDeconvolver:
             cen = self.x[peak_idx]
             amp = y_smooth[peak_idx]
             
-            # Estimate sigma with fallback
             sigma = GaussianModel.estimate_sigma_from_peak(self.x, y_smooth, peak_idx)
             sigma = max(sigma, 0.01 * (np.max(self.x) - np.min(self.x)) / max(len(peaks), 1))
             
-            # Get original Y value for display
             if self.use_log_x:
                 x_linear = 10**self.x[peak_idx]
             else:
                 x_linear = self.x[peak_idx]
             
-            # Find closest index in original data
             idx = np.argmin(np.abs(self.x_sorted - x_linear))
             y_original_value = self.y_sorted[idx]
             
-            # Get method from peak_details
             method_used = 'auto'
             for detail in peak_details:
                 if detail['index'] == peak_idx:
@@ -2582,37 +2443,31 @@ class GaussianDeconvolver:
                 'method': method_used
             })
             
-            # Add parameters based on model type
             if self.model_type in ['gaussian', 'lorentzian']:
                 initial_params.extend([amp, cen, sigma])
-            else:  # pseudo_voigt or voigt
+            else:
                 eta = GaussianModel.estimate_eta_from_peak(self.x, y_smooth, peak_idx)
                 if self.model_type == 'pseudo_voigt':
                     initial_params.extend([amp, cen, sigma, eta])
-                else:  # voigt
+                else:
                     gamma = sigma * 0.5
                     initial_params.extend([amp, cen, sigma, gamma])
         
-        # Store peak_info for later use
         self.peak_info = peak_info
         
-        # Calculate derivatives for visualization
         dy, d2y, y_smooth_deriv = DerivativeAnalyzer.calculate_derivatives(self.x, y_smooth)
         
         return peaks, peak_info, initial_params, (dy, d2y, y_smooth_deriv)
     
     def add_manual_peak(self, x_position_linear, amplitude=None, sigma_est=None, eta_est=None):
         """Add a peak manually at specified linear X position"""
-        # Convert to log space if needed
         if self.use_log_x:
             x_position = np.log10(x_position_linear)
         else:
             x_position = x_position_linear
         
-        # Find index for amplitude estimation
         idx = np.argmin(np.abs(self.x_sorted - x_position_linear))
         
-        # Estimate amplitude if not provided
         if amplitude is None:
             if self.use_log_x:
                 log_idx = np.argmin(np.abs(self.x - x_position))
@@ -2620,7 +2475,6 @@ class GaussianDeconvolver:
             else:
                 amplitude = self.y_norm[idx] if idx < len(self.y_norm) else 0.1
         
-        # Estimate sigma if not provided
         if sigma_est is None:
             if self.use_log_x:
                 x_search = self.x
@@ -2643,11 +2497,9 @@ class GaussianDeconvolver:
             width = (x_search[right_idx] - x_search[left_idx]) if right_idx > left_idx else 0.1
             sigma_est = max(width / 3.0, 0.01 * (np.max(x_search) - np.min(x_search)) / 20)
         
-        # Estimate eta if not provided
         if eta_est is None:
             eta_est = 0.5
         
-        # Add peak info
         peak_info_entry = {
             'index': idx,
             'x': x_position,
@@ -2663,7 +2515,6 @@ class GaussianDeconvolver:
             'method': 'manual'
         }
         
-        # Add parameters based on model type
         if self.model_type in ['gaussian', 'lorentzian']:
             initial_params = [amplitude, x_position, sigma_est]
         else:
@@ -2676,12 +2527,10 @@ class GaussianDeconvolver:
         if not peak_info:
             return [], []
         
-        # Build initial model with current peaks
         n_peaks = len(peak_info)
         if n_peaks == 0:
             return [], []
         
-        # Get parameters based on model type
         params_per_peak = 4 if self.model_type in ['pseudo_voigt', 'voigt'] else 3
         peak_params = []
         for info in peak_info:
@@ -2691,20 +2540,17 @@ class GaussianDeconvolver:
                 eta = info.get('eta_est', 0.5)
                 peak_params.extend([info['amp_est'], info['cen_est'], info['sigma_est'], eta])
         
-        # Calculate initial fit
         if self.model_type == 'gaussian':
             y_initial_fit = GaussianModel.multi_gaussian(self.x, *peak_params)
         elif self.model_type == 'lorentzian':
             y_initial_fit = GaussianModel.multi_lorentzian(self.x, *peak_params)
         elif self.model_type == 'pseudo_voigt':
             y_initial_fit = GaussianModel.multi_pseudo_voigt(self.x, *peak_params)
-        else:  # voigt
+        else:
             y_initial_fit = GaussianModel.multi_voigt(self.x, *peak_params)
         
-        # Calculate residuals
         residuals = self.y_norm - y_initial_fit
         
-        # Use ResidualsAnalyzer to find missing peaks
         suggested = ResidualsAnalyzer.suggest_peaks_from_residuals(
             self.x, residuals, peak_info, sensitivity, min_distance
         )
@@ -2717,7 +2563,6 @@ class GaussianDeconvolver:
             amp = suggestion['amp']
             sigma = suggestion['sigma']
             
-            # Get original Y value for display
             if self.use_log_x:
                 x_linear = 10**cen
             else:
@@ -2726,7 +2571,6 @@ class GaussianDeconvolver:
             orig_idx = np.argmin(np.abs(self.x_sorted - x_linear))
             y_original_value = self.y_sorted[orig_idx]
             
-            # Estimate eta
             eta = GaussianModel.estimate_eta_from_peak(self.x, residuals, suggestion['index'])
             
             missing_peaks.append({
@@ -2746,7 +2590,6 @@ class GaussianDeconvolver:
                 'sign': suggestion['sign']
             })
             
-            # Add parameters based on model type
             if self.model_type in ['gaussian', 'lorentzian']:
                 missing_params.extend([amp, cen, sigma])
             else:
@@ -2755,21 +2598,14 @@ class GaussianDeconvolver:
         return missing_peaks, missing_params
     
     def sort_peaks_by_x(self):
-        """
-        Sort peaks by X position (in linear space) and renumber them.
-        This ensures consistent ordering regardless of detection order.
-        Returns sorted peak_info list.
-        """
+        """Sort peaks by X position (in linear space) and renumber them."""
         if not hasattr(self, 'peak_info') or not self.peak_info:
             return self.peak_info
         
-        # Sort by x_linear
         sorted_peaks = sorted(self.peak_info, key=lambda p: p['x_linear'])
         
-        # Renumber peaks sequentially
         for i, peak in enumerate(sorted_peaks):
             peak['sorted_index'] = i + 1
-            # Preserve original ID if needed
             if 'original_id' not in peak:
                 peak['original_id'] = peak.get('id', i + 1)
             peak['id'] = i + 1
@@ -2785,7 +2621,6 @@ class GaussianDeconvolver:
         if len(initial_params) == 0:
             return False
         
-        # Create fitter with selected parameters
         self.fitter = GaussianFitter(
             method=method, 
             max_nfev=maxfev,
@@ -2797,7 +2632,6 @@ class GaussianDeconvolver:
             aic_bic_threshold=self.aic_bic_threshold
         )
         
-        # Perform fit with normalization factor
         success, popt, components, baseline_params = self.fitter.fit(
             self.x, self.y_norm, initial_params, self.y_max,
             normalization_factor=self.scale_to_original,
@@ -2812,45 +2646,33 @@ class GaussianDeconvolver:
             self.bic_history = self.fitter.bic_history
             self.peak_count_history = self.fitter.peak_count_history
             
-            # Reconstruct full fit with baseline in normalized space
-            n_peaks = len(components)
-            params_per_peak = self.fitter.get_params_per_peak()
-            peak_params = []
-            for c in components:
-                if params_per_peak == 3:
-                    peak_params.extend([c['amp_norm'], c['cen_log'], c['sigma_log']])
-                else:
-                    peak_params.extend([c['amp_norm'], c['cen_log'], c['sigma_log'], c.get('eta', 0.5)])
+            # Используем fit_y_norm из fitter (он уже включает baseline)
+            self.fit_y_norm = self.fitter.fit_y_norm
             
-            # Use appropriate model for total fit
-            model_type = self.model_type
-            if model_type == 'gaussian':
-                self.fit_y_norm = GaussianModel.multi_gaussian(self.x, *peak_params)
-            elif model_type == 'lorentzian':
-                self.fit_y_norm = GaussianModel.multi_lorentzian(self.x, *peak_params)
-            elif model_type == 'pseudo_voigt':
-                self.fit_y_norm = GaussianModel.multi_pseudo_voigt(self.x, *peak_params)
-            else:  # voigt
-                self.fit_y_norm = GaussianModel.multi_voigt(self.x, *peak_params)
+            # Конвертируем фит в исходный масштаб
+            if self.fit_y_norm is not None:
+                self.fit_y_original = self.fit_y_norm * self.scale_to_original
+            else:
+                self.fit_y_original = None
             
-            # Add baseline if present
-            if baseline_params and self.baseline_method != 'none':
-                if self.baseline_method == 'constant':
-                    self.fit_y_norm += baseline_params[0]
-                elif self.baseline_method == 'linear':
-                    self.fit_y_norm += baseline_params[0] + baseline_params[1] * self.x
-                elif self.baseline_method == 'quadratic':
-                    self.fit_y_norm += baseline_params[0] + baseline_params[1] * self.x + baseline_params[2] * self.x**2
+            # Обновляем компоненты с правильными амплитудами в исходном масштабе
+            for c in self.components:
+                c['amp_original'] = c['amp_norm'] * self.scale_to_original
+                c['area_original'] = c['area_norm'] * self.scale_to_original
+                c['normalization_factor'] = self.scale_to_original
             
-            # Calculate total area (in original scale)
+            # Пересчитываем фракции
+            total_area_norm = sum([c['area_norm'] for c in self.components])
+            for c in self.components:
+                c['fraction'] = c['area_norm'] / total_area_norm if total_area_norm > 0 else 0
+                c['fraction_percent'] = c['fraction'] * 100
+            
             self.total_area = sum([c['area_original'] for c in self.components])
             
-            # Quality metrics
             self.quality_metrics = FitQualityAnalyzer.calculate_metrics(
                 self.y_norm, self.fit_y_norm, len(popt)
             )
             
-            # Validate fit quality
             self._validate_fit_quality()
             
             return True
@@ -2862,16 +2684,13 @@ class GaussianDeconvolver:
         if not self.components:
             return
         
-        # Check if amplitudes are reasonable
         max_original_y = np.max(self.y_original)
         max_component_amp = max([c['amp_original'] for c in self.components])
         
-        # If the max component amplitude is less than 10% of max original Y, warn
         if max_component_amp < 0.1 * max_original_y and max_original_y > 0:
             warnings.warn(f"Max component amplitude ({max_component_amp:.3e}) is less than 10% of max original Y ({max_original_y:.3e}). "
                           f"Check scaling or fit quality.")
         
-        # Check if fit R² is reasonable
         if self.quality_metrics and self.quality_metrics.get('R²', 0) < 0.5:
             warnings.warn(f"Fit R² = {self.quality_metrics.get('R²', 0):.3f} is low. Consider adding more peaks or adjusting parameters.")
     
@@ -2883,13 +2702,11 @@ class GaussianDeconvolver:
         if len(initial_params) == 0:
             return None
         
-        # Create temporary fitter
         fitter = GaussianFitter(
             baseline_method=self.baseline_method,
             model_type=self.model_type
         )
         
-        # Preview fit
         n_baseline = fitter.get_n_baseline_params()
         baseline_params = [0] * n_baseline if n_baseline > 0 else None
         
@@ -2928,7 +2745,6 @@ class GaussianDeconvolver:
         else:
             return False
         
-        # Apply pending remove
         if st.session_state.app_state.pending_remove is not None:
             remove_id = st.session_state.app_state.pending_remove
             new_params = []
@@ -2941,7 +2757,6 @@ class GaussianDeconvolver:
             current_params = new_params
             st.session_state.app_state.pending_remove = None
         
-        # Apply pending split
         if st.session_state.app_state.pending_split is not None:
             peak_id, split_position = st.session_state.app_state.pending_split
             peak = self.components[peak_id - 1]
@@ -2978,7 +2793,6 @@ class GaussianDeconvolver:
             current_params = new_params
             st.session_state.app_state.pending_split = None
         
-        # Perform fit
         return self.fit(
             initial_params=current_params,
             method=st.session_state.app_state.fitting_method,
@@ -2997,7 +2811,6 @@ class GaussianDeconvolver:
                    [{'type': 'bar'}, {'type': 'table'}]]
         )
         
-        # Scientific styling for Plotly
         plotly_template = {
             'layout': {
                 'font': {'family': 'serif', 'size': 12},
@@ -3040,7 +2853,6 @@ class GaussianDeconvolver:
             }
         }
         
-        # Main plot
         fig.add_trace(
             go.Scatter(x=self.x, y=self.y_norm,
                       mode='markers+lines',
@@ -3050,15 +2862,15 @@ class GaussianDeconvolver:
             row=1, col=1
         )
         
-        fig.add_trace(
-            go.Scatter(x=self.x, y=self.fit_y_norm,
-                      mode='lines',
-                      name='Total Fit',
-                      line=dict(color='red', width=2, dash='solid')),
-            row=1, col=1
-        )
+        if self.fit_y_norm is not None:
+            fig.add_trace(
+                go.Scatter(x=self.x, y=self.fit_y_norm,
+                          mode='lines',
+                          name='Total Fit',
+                          line=dict(color='red', width=2, dash='solid')),
+                row=1, col=1
+            )
         
-        # Components
         colors = plt.cm.Set3(np.linspace(0, 1, len(self.components)))
         for c, color in zip(self.components, colors):
             rgb_color = f'rgb({int(color[0]*255)}, {int(color[1]*255)}, {int(color[2]*255)})'
@@ -3074,7 +2886,6 @@ class GaussianDeconvolver:
                 row=1, col=1
             )
         
-        # Residuals
         if 'Residuals' in self.quality_metrics:
             residuals = self.quality_metrics['Residuals']
             fig.add_trace(
@@ -3088,7 +2899,6 @@ class GaussianDeconvolver:
             fig.add_hline(y=0, line_dash="dash", line_color="red", 
                          line_width=1, row=1, col=2)
         
-        # Bar chart of components
         centers = [f"Peak {c['id']}" for c in self.components]
         fractions = [c['fraction_percent'] for c in self.components]
         
@@ -3102,7 +2912,6 @@ class GaussianDeconvolver:
             row=2, col=1
         )
         
-        # Metrics table
         metrics = self.quality_metrics
         metrics_table = go.Table(
             header=dict(
@@ -3130,7 +2939,6 @@ class GaussianDeconvolver:
         )
         fig.add_trace(metrics_table, row=2, col=2)
         
-        # Update layout with scientific styling
         fig.update_layout(
             height=700,
             showlegend=True,
@@ -3144,7 +2952,6 @@ class GaussianDeconvolver:
             )
         )
         
-        # Update axes
         fig.update_xaxes(
             title_text=self.x_label,
             title_font=dict(family='serif', size=13, weight='bold'),
