@@ -1977,7 +1977,7 @@ class SpectrumPlotter:
             fig = ax.figure
         
         # Apply scales
-        if deconvolver.use_log_x:
+        
             ax.set_xscale('log')
         if deconvolver.use_log_y:
             ax.set_yscale('log')
@@ -2180,25 +2180,37 @@ class SpectrumPlotter:
         if show_components and deconvolver.components:
             colors = plt.cm.Set3(np.linspace(0, 1, len(deconvolver.components)))
             for c, color in zip(deconvolver.components, colors):
-                # Get normalized component Y
-                component_y_norm = c['y_norm']
+                # Get normalized component Y using x_dense_log
+                if deconvolver.model_type == 'gaussian':
+                    y_component_norm = GaussianModel.gaussian(x_dense_log, c['amp_norm'], 
+                                                              c['cen_log'], c['sigma_log'])
+                elif deconvolver.model_type == 'lorentzian':
+                    y_component_norm = GaussianModel.lorentzian(x_dense_log, c['amp_norm'], 
+                                                                c['cen_log'], c['sigma_log'])
+                elif deconvolver.model_type == 'pseudo_voigt':
+                    eta = c.get('eta', 0.5)
+                    y_component_norm = GaussianModel.pseudo_voigt(x_dense_log, c['amp_norm'], 
+                                                                  c['cen_log'], c['sigma_log'], eta)
+                else:  # voigt
+                    gamma = c.get('gamma', c['sigma_log'] * 0.5)
+                    y_component_norm = GaussianModel.voigt(x_dense_log, c['amp_norm'], 
+                                                           c['cen_log'], c['sigma_log'], gamma)
                 
                 # Scale to original data scale
                 if deconvolver.use_log_y:
-                    # For log Y, we need to convert back
-                    y_component = (10 ** (component_y_norm * scale_factor)) if np.any(component_y_norm > 0) else component_y_norm * scale_factor
+                    y_component = (10 ** (y_component_norm * scale_factor)) if np.any(y_component_norm > 0) else y_component_norm * scale_factor
                 else:
-                    y_component = component_y_norm * scale_factor
+                    y_component = y_component_norm * scale_factor
                 
                 # Ensure we don't have negative values for log scale
                 if deconvolver.use_log_y and np.any(y_component < 0):
                     y_component = np.maximum(y_component, 1e-12)
                 
-                # Fill under Gaussian
+                # Fill under Gaussian - используем x_dense (не x_dense_log!)
                 ax.fill_between(x_dense, 0, y_component, 
                                 color=color, alpha=0.3, linewidth=0)
                 
-                # Plot line
+                # Plot line - тоже используем x_dense
                 ax.plot(x_dense, y_component, '-', color=color, linewidth=2,
                        label=f'Peak {c["id"]}: {c["fraction_percent"]:.1f}%', zorder=2)
         
