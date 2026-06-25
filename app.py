@@ -1001,6 +1001,10 @@ class DataPreprocessor:
         self.small_values_warning = False
         self.baseline_removed = False
         self.baseline_values = None
+        # Новые поля для отслеживания преобразований
+        self.applied_transformations = []
+        self.original_max_y = None
+        self.preprocessed_max_y = None
     
     def smooth_data(self, x, y, method='savgol', level='none', x_log=False):
         """Smooth data with various methods and levels"""
@@ -1157,12 +1161,17 @@ class DataPreprocessor:
         x_sorted = x_linear[sort_idx]
         y_sorted = y_original[sort_idx]
         
+        # Сохраняем информацию о преобразованиях
+        self.applied_transformations = []
+        self.original_max_y = np.max(y_sorted) if len(y_sorted) > 0 else 1.0
+        
         # Handle negative values
         if self.clip_negative:
             negative_mask = y_sorted < 0
             self.clipped_points = np.sum(negative_mask)
             if self.clipped_points > 0 and self.show_warnings:
                 warnings.warn(f"Clipped {self.clipped_points} negative values to 0")
+                self.applied_transformations.append('clip_negative')
             y_for_fitting = np.maximum(y_sorted, 0)
         else:
             y_for_fitting = y_sorted
@@ -1176,6 +1185,7 @@ class DataPreprocessor:
             self.baseline_removed = True
             self.baseline_values = baseline
             y_for_fitting = y_corrected
+            self.applied_transformations.append(f'baseline_{baseline_method}')
         else:
             self.baseline_removed = False
             self.baseline_values = None
@@ -1183,6 +1193,10 @@ class DataPreprocessor:
         # Apply smoothing if requested
         if smoothing_level != 'none':
             y_for_fitting = self.smooth_data(x_sorted, y_for_fitting, 'savgol', smoothing_level, use_log_x)
+            self.applied_transformations.append(f'smoothing_{smoothing_level}')
+        
+        # Сохраняем максимум после предобработки
+        self.preprocessed_max_y = np.max(y_for_fitting) if np.any(y_for_fitting > 0) else 1.0
         
         # Small epsilon for log transformations
         eps = np.finfo(float).eps
@@ -1206,6 +1220,7 @@ class DataPreprocessor:
             y_pos = np.maximum(y_for_fitting, eps)
             y = np.log10(y_pos)
             y_label = 'log₁₀(Y)'
+            self.applied_transformations.append('log_y')
         else:
             y = y_for_fitting
             y_label = 'Y'
@@ -1221,7 +1236,10 @@ class DataPreprocessor:
             'clipped_points': self.clipped_points,
             'small_values_warning': self.small_values_warning,
             'baseline_removed': self.baseline_removed,
-            'baseline_values': self.baseline_values
+            'baseline_values': self.baseline_values,
+            'original_max_y': self.original_max_y,
+            'preprocessed_max_y': self.preprocessed_max_y,
+            'applied_transformations': self.applied_transformations
         }
 
 
@@ -1638,9 +1656,27 @@ class GaussianFitter:
         else:  # pseudo_voigt, voigt
             return 4  # amp, cen, sigma, eta/gamma
     
-    def fit(self, x, y_norm, initial_peak_params, y_max, 
+    def fit(self, x, y_norm, initial_peak_params, y_max, normalization_factor=1.0,
             progress_callback=None, fixed_params=None):
-        """Perform fitting with progress tracking"""
+        """Perform fitting with progress tracking
+        
+        Parameters:
+        -----------
+        x : array_like
+            X coordinates (in fitting space)
+        y_norm : array_like
+            Normalized Y data (0-1 scale)
+        initial_peak_params : list
+            Initial parameters for peaks (normalized)
+        y_max : float
+            Maximum value of y_norm (for scaling)
+        normalization_factor : float
+            Factor to convert from normalized to original scale
+        progress_callback : callable
+            Progress callback function
+        fixed_params : list
+            Fixed parameters (not used currently)
+        """
         n_peaks = len(initial_peak_params) // self.get_params_per_peak()
         n_baseline = self.get_n_baseline_params()
         
@@ -1721,7 +1757,8 @@ class GaussianFitter:
                 cen = peak_params[base_idx + 1]
                 sigma = abs(peak_params[base_idx + 2])
                 
-                amp = amp_norm * y_max
+                # Store amplitude in normalized form
+                amp_norm_scaled = amp_norm
                 
                 # Get eta for pseudo_voigt or gamma for voigt
                 eta = 0.5
@@ -1730,11 +1767,11 @@ class GaussianFitter:
                     eta = np.clip(peak_params[base_idx + 3], 0, 1) if self.model_type == 'pseudo_voigt' else 0.5
                     gamma = abs(peak_params[base_idx + 3]) if self.model_type == 'voigt' else sigma * 0.5
                 
-                # Calculate area and FWHM
-                area = GaussianModel.calculate_area(amp_norm, sigma, self.model_type, eta) * y_max
+                # Calculate area and FWHM in normalized space
+                area_norm = GaussianModel.calculate_area(amp_norm, sigma, self.model_type, eta)
                 fwhm = GaussianModel.calculate_fwhm(sigma, self.model_type, eta)
                 
-                # Generate component curve
+                # Generate component curve (normalized)
                 if self.model_type == 'gaussian':
                     component_y_norm = GaussianModel.gaussian(x, amp_norm, cen, sigma)
                 elif self.model_type == 'lorentzian':
@@ -1750,26 +1787,30 @@ class GaussianFitter:
                 else:
                     cen_linear = cen
                 
+                # Store component with normalized amplitude
                 components.append({
                     'id': i + 1,
                     'amp_norm': amp_norm,
-                    'amp': amp,
+                    'amp_norm_scaled': amp_norm_scaled,
+                    'amp_original': amp_norm * normalization_factor,  # Original scale
                     'cen_log': cen,
                     'cen_linear': cen_linear,
                     'sigma_log': sigma,
                     'fwhm': fwhm,
-                    'area': area,
+                    'area_norm': area_norm,
+                    'area_original': area_norm * normalization_factor,
                     'fraction': 0,
                     'y_norm': component_y_norm,
                     'eta': eta,
                     'gamma': gamma,
-                    'model_type': self.model_type
+                    'model_type': self.model_type,
+                    'normalization_factor': normalization_factor
                 })
             
             # Calculate fractions
-            total_area = sum([c['area'] for c in components])
+            total_area_norm = sum([c['area_norm'] for c in components])
             for c in components:
-                c['fraction'] = c['area'] / total_area if total_area > 0 else 0
+                c['fraction'] = c['area_norm'] / total_area_norm if total_area_norm > 0 else 0
                 c['fraction_percent'] = c['fraction'] * 100
             
             # Apply AIC/BIC control if enabled
@@ -1947,10 +1988,17 @@ class SpectrumPlotter:
                 label='Original Data', color='black', zorder=1)
         
         # Plot smoothed data (converted back to original scale)
+        # Use the scaling factor to convert normalized smooth data to original scale
         if deconvolver.use_log_y:
+            # For log Y, we need to handle it differently
             y_smooth_original = 10**(y_smooth * deconvolver.y_max)
         else:
-            y_smooth_original = y_smooth * deconvolver.y_max
+            # Use the scale_to_original factor
+            if hasattr(deconvolver, 'scale_to_original'):
+                y_smooth_original = y_smooth * deconvolver.scale_to_original
+            else:
+                # Fallback: use y_max
+                y_smooth_original = y_smooth * deconvolver.y_max
         
         ax.plot(deconvolver.x_sorted, y_smooth_original, 
                 'r-', linewidth=2, label='Smoothed', color='red', zorder=2)
@@ -2114,25 +2162,37 @@ class SpectrumPlotter:
                                   np.max(deconvolver.x_linear), 2000)
             x_dense_log = x_dense
         
-        # Plot components
+        # Determine scaling factor to original data
+        if hasattr(deconvolver, 'scale_to_original'):
+            scale_factor = deconvolver.scale_to_original
+        else:
+            # Fallback: try to compute from data
+            if deconvolver.y_original is not None and len(deconvolver.y_original) > 0:
+                original_max = np.max(deconvolver.y_original)
+                if original_max > 0 and deconvolver.y_norm is not None and np.max(deconvolver.y_norm) > 0:
+                    scale_factor = original_max / np.max(deconvolver.y_norm)
+                else:
+                    scale_factor = deconvolver.y_max
+            else:
+                scale_factor = deconvolver.y_max
+        
+        # Plot components with proper scaling
         if show_components and deconvolver.components:
             colors = plt.cm.Set3(np.linspace(0, 1, len(deconvolver.components)))
             for c, color in zip(deconvolver.components, colors):
-                # Generate component using appropriate model
-                if c.get('model_type', 'gaussian') == 'gaussian':
-                    y_component = GaussianModel.gaussian(x_dense_log, c['amp_norm'], 
-                                                        c['cen_log'], c['sigma_log']) * deconvolver.y_max
-                elif c.get('model_type', 'gaussian') == 'lorentzian':
-                    y_component = GaussianModel.lorentzian(x_dense_log, c['amp_norm'], 
-                                                          c['cen_log'], c['sigma_log']) * deconvolver.y_max
-                elif c.get('model_type', 'gaussian') == 'pseudo_voigt':
-                    eta = c.get('eta', 0.5)
-                    y_component = GaussianModel.pseudo_voigt(x_dense_log, c['amp_norm'], 
-                                                            c['cen_log'], c['sigma_log'], eta) * deconvolver.y_max
-                else:  # voigt
-                    gamma = c.get('gamma', c['sigma_log'] * 0.5)
-                    y_component = GaussianModel.voigt(x_dense_log, c['amp_norm'], 
-                                                     c['cen_log'], c['sigma_log'], gamma) * deconvolver.y_max
+                # Get normalized component Y
+                component_y_norm = c['y_norm']
+                
+                # Scale to original data scale
+                if deconvolver.use_log_y:
+                    # For log Y, we need to convert back
+                    y_component = (10 ** (component_y_norm * scale_factor)) if np.any(component_y_norm > 0) else component_y_norm * scale_factor
+                else:
+                    y_component = component_y_norm * scale_factor
+                
+                # Ensure we don't have negative values for log scale
+                if deconvolver.use_log_y and np.any(y_component < 0):
+                    y_component = np.maximum(y_component, 1e-12)
                 
                 # Fill under Gaussian
                 ax.fill_between(x_dense, 0, y_component, 
@@ -2145,37 +2205,48 @@ class SpectrumPlotter:
         # Plot baseline if available
         if show_baseline and hasattr(deconvolver, 'baseline_params') and deconvolver.baseline_params:
             if deconvolver.baseline_method == 'constant':
-                y_baseline = deconvolver.baseline_params[0] * deconvolver.y_max
+                y_baseline = deconvolver.baseline_params[0] * scale_factor
                 ax.axhline(y=y_baseline, color='gray', linestyle=':', 
                           linewidth=1.5, label='Baseline', zorder=1)
             elif deconvolver.baseline_method == 'linear':
                 y_baseline = (deconvolver.baseline_params[0] + 
-                            deconvolver.baseline_params[1] * x_dense_log) * deconvolver.y_max
+                            deconvolver.baseline_params[1] * x_dense_log) * scale_factor
                 ax.plot(x_dense, y_baseline, 'gray', linestyle=':', 
                        linewidth=1.5, label='Baseline', zorder=1)
             elif deconvolver.baseline_method == 'quadratic':
                 y_baseline = (deconvolver.baseline_params[0] + 
                             deconvolver.baseline_params[1] * x_dense_log +
-                            deconvolver.baseline_params[2] * x_dense_log**2) * deconvolver.y_max
+                            deconvolver.baseline_params[2] * x_dense_log**2) * scale_factor
                 ax.plot(x_dense, y_baseline, 'gray', linestyle=':', 
                        linewidth=1.5, label='Baseline', zorder=1)
         
         # Plot total fit
         if preview_mode and preview_fit is not None:
-            y_total = preview_fit * deconvolver.y_max
+            if deconvolver.use_log_y:
+                y_total = (10 ** (preview_fit * scale_factor)) if np.any(preview_fit > 0) else preview_fit * scale_factor
+            else:
+                y_total = preview_fit * scale_factor
             ax.plot(x_dense, y_total, 'b--', linewidth=2, 
                    label='Preview (no fit)', zorder=3, alpha=0.7)
         elif deconvolver.fit_y_norm is not None:
-            # Используем уже готовый fit из deconvolver
-            # Интерполируем fit_y_norm на плотную сетку x_dense
             from scipy.interpolate import interp1d
             
-            # Создаем интерполяционную функцию на основе сохраненных x и fit_y_norm
+            # Create interpolation function
             fit_interp = interp1d(deconvolver.x, deconvolver.fit_y_norm, 
                                   kind='linear', fill_value='extrapolate')
             
-            # Вычисляем значения на плотной сетке
-            y_total = fit_interp(x_dense_log) * deconvolver.y_max
+            # Compute values on dense grid
+            y_total_norm = fit_interp(x_dense_log)
+            
+            # Scale to original data scale
+            if deconvolver.use_log_y:
+                y_total = (10 ** (y_total_norm * scale_factor)) if np.any(y_total_norm > 0) else y_total_norm * scale_factor
+            else:
+                y_total = y_total_norm * scale_factor
+            
+            # Ensure we don't have negative values for log scale
+            if deconvolver.use_log_y and np.any(y_total < 0):
+                y_total = np.maximum(y_total, 1e-12)
             
             ax.plot(x_dense, y_total, 'r--', linewidth=2, label='Total Fit', zorder=3)
         
@@ -2206,6 +2277,11 @@ class SpectrumPlotter:
         if self.scientific_style:
             self._apply_scientific_style(ax)
         
+        # Add scaling info
+        if hasattr(deconvolver, 'scale_to_original'):
+            ax.text(0.02, 0.02, f"Scale factor: {deconvolver.scale_to_original:.3f}", 
+                   transform=ax.transAxes, fontsize=8, color='gray')
+        
         return fig, ax
     
     def _apply_scientific_style(self, ax):
@@ -2230,7 +2306,14 @@ class PeakVisualizer:
         # Use original Y values, not normalized
         ax.plot(deconvolver.x, deconvolver.y, 
                'o-', markersize=3, alpha=0.5, label='Data', color='black')
-        ax.plot(deconvolver.x, y_smooth * deconvolver.y_max, 
+        
+        # Scale smooth data to original scale
+        if hasattr(deconvolver, 'scale_to_original'):
+            y_smooth_scaled = y_smooth * deconvolver.scale_to_original
+        else:
+            y_smooth_scaled = y_smooth * deconvolver.y_max
+        
+        ax.plot(deconvolver.x, y_smooth_scaled, 
                'r-', linewidth=2, label='Smoothed')
         
         for i, info in enumerate(peak_info):
@@ -2296,6 +2379,9 @@ class GaussianDeconvolver:
         self.x_sorted = self.x_linear.copy()
         self.y_sorted = self.y_original.copy()
         
+        # Store original max for scaling
+        self.original_max_y = np.max(self.y_original) if np.any(self.y_original > 0) else 1.0
+        
         # Preprocess data
         self.preprocessor = DataPreprocessor(clip_negative, show_warnings)
         preprocessed = self.preprocessor.preprocess_for_fitting(
@@ -2315,14 +2401,23 @@ class GaussianDeconvolver:
         self.small_values_warning = preprocessed['small_values_warning']
         self.baseline_removed = preprocessed['baseline_removed']
         self.baseline_values = preprocessed['baseline_values']
+        self.preprocessed_max_y = preprocessed.get('preprocessed_max_y', 1.0)
+        self.applied_transformations = preprocessed.get('applied_transformations', [])
         
-        # Normalization - use 95th percentile instead of max for robustness
-        self.y_max = np.percentile(self.y_for_fitting, 95) if np.any(self.y_for_fitting > 0) else 1.0
+        # Calculate scaling factor from normalized to original scale
+        # Use the maximum of y_original (original data) and preprocessed data
+        if self.preprocessed_max_y > 0 and self.original_max_y > 0:
+            self.scale_to_original = self.original_max_y / self.preprocessed_max_y
+        else:
+            self.scale_to_original = 1.0
         
-        # For fitting, we normalize but keep track for denormalization
-        if self.y_max > 0:
+        # For fitting, we normalize using the preprocessed max
+        if self.preprocessed_max_y > 0:
+            # Use the preprocessed max for normalization to keep y_norm in 0-1 range
+            self.y_max = self.preprocessed_max_y
             self.y_norm = self.y / self.y_max
         else:
+            self.y_max = 1.0
             self.y_norm = self.y
         
         # Results containers
@@ -2343,6 +2438,22 @@ class GaussianDeconvolver:
         # For compatibility with existing code
         self.multi_gaussian = GaussianModel.multi_gaussian
         self.gaussian = GaussianModel.gaussian
+        
+        # Store peak_info for sorting
+        self.peak_info = []
+    
+    def get_scaling_factor(self, target='original'):
+        """
+        Возвращает коэффициент масштабирования для перехода 
+        от нормализованных данных к целевому масштабу.
+        target: 'original' - к исходным данным, 'preprocessed' - к предобработанным
+        """
+        if target == 'original':
+            return self.scale_to_original
+        elif target == 'preprocessed':
+            return 1.0
+        else:
+            return self.scale_to_original
     
     def auto_detect_peaks(self, sensitivity=0.03, min_distance=5, method='hybrid'):
         """
@@ -2474,6 +2585,9 @@ class GaussianDeconvolver:
                 else:  # voigt
                     gamma = sigma * 0.5
                     initial_params.extend([amp, cen, sigma, gamma])
+        
+        # Store peak_info for later use
+        self.peak_info = peak_info
         
         # Calculate derivatives for visualization
         dy, d2y, y_smooth_deriv = DerivativeAnalyzer.calculate_derivatives(self.x, y_smooth)
@@ -2676,9 +2790,10 @@ class GaussianDeconvolver:
             aic_bic_threshold=self.aic_bic_threshold
         )
         
-        # Perform fit
+        # Perform fit with normalization factor
         success, popt, components, baseline_params = self.fitter.fit(
             self.x, self.y_norm, initial_params, self.y_max,
+            normalization_factor=self.scale_to_original,
             progress_callback=progress_callback
         )
         
@@ -2690,7 +2805,7 @@ class GaussianDeconvolver:
             self.bic_history = self.fitter.bic_history
             self.peak_count_history = self.fitter.peak_count_history
             
-            # Reconstruct full fit with baseline
+            # Reconstruct full fit with baseline in normalized space
             n_peaks = len(components)
             params_per_peak = self.fitter.get_params_per_peak()
             peak_params = []
@@ -2720,17 +2835,38 @@ class GaussianDeconvolver:
                 elif self.baseline_method == 'quadratic':
                     self.fit_y_norm += baseline_params[0] + baseline_params[1] * self.x + baseline_params[2] * self.x**2
             
-            # Calculate total area
-            self.total_area = sum([c['area'] for c in self.components])
+            # Calculate total area (in original scale)
+            self.total_area = sum([c['area_original'] for c in self.components])
             
             # Quality metrics
             self.quality_metrics = FitQualityAnalyzer.calculate_metrics(
                 self.y_norm, self.fit_y_norm, len(popt)
             )
             
+            # Validate fit quality
+            self._validate_fit_quality()
+            
             return True
         
         return False
+    
+    def _validate_fit_quality(self):
+        """Validate the quality of the fit and warn if there are issues"""
+        if not self.components:
+            return
+        
+        # Check if amplitudes are reasonable
+        max_original_y = np.max(self.y_original)
+        max_component_amp = max([c['amp_original'] for c in self.components])
+        
+        # If the max component amplitude is less than 10% of max original Y, warn
+        if max_component_amp < 0.1 * max_original_y and max_original_y > 0:
+            warnings.warn(f"Max component amplitude ({max_component_amp:.3e}) is less than 10% of max original Y ({max_original_y:.3e}). "
+                          f"Check scaling or fit quality.")
+        
+        # Check if fit R² is reasonable
+        if self.quality_metrics and self.quality_metrics.get('R²', 0) < 0.5:
+            warnings.warn(f"Fit R² = {self.quality_metrics.get('R²', 0):.3f} is low. Consider adding more peaks or adjusting parameters.")
     
     def preview_fit(self, initial_params=None):
         """Preview fit without optimization (fast)"""
@@ -4498,7 +4634,7 @@ elif st.session_state.app_state.current_step == 5:
                 # 1. Bar chart of areas (top left)
                 ax1 = plt.subplot(2, 2, 1)
                 peaks = [f'Peak {c["id"]}' for c in deconv.components]
-                areas = [c['area'] for c in deconv.components]
+                areas = [c['area_original'] for c in deconv.components]
                 fractions = [c['fraction_percent'] for c in deconv.components]
                 colors = plt.cm.Set3(np.linspace(0, 1, len(peaks)))
                 
@@ -4567,7 +4703,7 @@ elif st.session_state.app_state.current_step == 5:
             col_sum1, col_sum2, col_sum3, col_sum4 = st.columns(4)
             
             with col_sum1:
-                total_area = sum([c['area'] for c in deconv.components])
+                total_area = sum([c['area_original'] for c in deconv.components])
                 st.metric("Total Area", f"{total_area:.4e}")
             
             with col_sum2:
@@ -4609,7 +4745,7 @@ elif st.session_state.app_state.current_step == 5:
             
             with col1:
                 # Find maximum amplitude for normalization
-                max_amp = max([c['amp'] for c in deconv.components])
+                max_amp = max([c['amp_original'] for c in deconv.components])
                 
                 # Create normalized plot
                 fig_norm, ax_norm = plt.subplots(figsize=(10, 6))
@@ -4647,7 +4783,8 @@ elif st.session_state.app_state.current_step == 5:
                         y_component_norm = GaussianModel.voigt(x_dense_log, c['amp_norm'], 
                                                               c['cen_log'], c['sigma_log'], gamma)
                     
-                    y_component_norm = y_component_norm * deconv.y_max / max_amp
+                    # Scale to max amplitude for normalization
+                    y_component_norm = y_component_norm * c['amp_original'] / max_amp
                     
                     # Fill under Gaussian
                     ax_norm.fill_between(x_dense, 0, y_component_norm, 
@@ -4661,12 +4798,12 @@ elif st.session_state.app_state.current_step == 5:
                 if deconv.fit_y_norm is not None:
                     from scipy.interpolate import interp1d
                     
-                    # Создаем интерполяционную функцию на основе сохраненных x и fit_y_norm
+                    # Создаем интерполяционную функцию
                     fit_interp = interp1d(deconv.x, deconv.fit_y_norm, 
                                           kind='linear', fill_value='extrapolate')
                     
                     # Вычисляем значения на плотной сетке и нормализуем
-                    y_total_norm = fit_interp(x_dense_log) * deconv.y_max / max_amp
+                    y_total_norm = fit_interp(x_dense_log) * deconv.scale_to_original / max_amp
                     
                     ax_norm.plot(x_dense, y_total_norm, 'r--', linewidth=2, label='Total Fit', zorder=3)
                 
@@ -4712,7 +4849,7 @@ elif st.session_state.app_state.current_step == 5:
                 fig_comp_norm, ax_comp_norm = plt.subplots(figsize=(10, 6))
                 
                 # Plot all normalized components on the same axes without fill
-                max_amp = max([c['amp'] for c in deconv.components])
+                max_amp = max([c['amp_original'] for c in deconv.components])
                 colors = plt.cm.Set3(np.linspace(0, 1, len(deconv.components)))
                 for c, color in zip(deconv.components, colors):
                     # Generate component using appropriate model
@@ -4731,7 +4868,7 @@ elif st.session_state.app_state.current_step == 5:
                         y_component_norm = GaussianModel.voigt(x_dense_log, c['amp_norm'], 
                                                               c['cen_log'], c['sigma_log'], gamma)
                     
-                    y_component_norm = y_component_norm * deconv.y_max / max_amp
+                    y_component_norm = y_component_norm * c['amp_original'] / max_amp
                     
                     ax_comp_norm.plot(x_dense, y_component_norm, '-', color=color, linewidth=2,
                                     label=f'Peak {c["id"]} (center: {c["cen_linear"]:.2e})')
@@ -4754,14 +4891,14 @@ elif st.session_state.app_state.current_step == 5:
             
             # Table of normalized values
             st.subheader("Normalized Parameters")
-            max_amp = max([c['amp'] for c in deconv.components])
+            max_amp = max([c['amp_original'] for c in deconv.components])
             norm_data = []
             for c in deconv.components:
                 norm_data.append({
                     'Peak': c['id'],
                     'Center': f"{c['cen_linear']:.4e}",
-                    'Normalized Amplitude': f"{c['amp'] / max_amp:.4f}",
-                    'Original Amplitude': f"{c['amp']:.4e}",
+                    'Normalized Amplitude': f"{c['amp_original'] / max_amp:.4f}",
+                    'Original Amplitude': f"{c['amp_original']:.4e}",
                     'Fraction (%)': f"{c['fraction_percent']:.2f}",
                     'Model': c.get('model_type', 'gaussian')
                 })
@@ -4779,11 +4916,12 @@ elif st.session_state.app_state.current_step == 5:
                     'Peak ID': c['id'],
                     'Center': c['cen_linear'],
                     'Center (log)': c['cen_log'],
-                    'Amplitude': c['amp'],
+                    'Amplitude (orig)': c['amp_original'],
                     'Amplitude (norm)': c['amp_norm'],
                     'Sigma (log)': c['sigma_log'],
                     'FWHM': c['fwhm'],
-                    'Area': c['area'],
+                    'Area (orig)': c['area_original'],
+                    'Area (norm)': c['area_norm'],
                     'Fraction': c['fraction'],
                     'Fraction (%)': c['fraction_percent'],
                     'Model': c.get('model_type', 'gaussian')
@@ -4798,7 +4936,7 @@ elif st.session_state.app_state.current_step == 5:
             
             # Format for display
             display_df = df.copy()
-            for col in ['Center', 'Amplitude', 'Area']:
+            for col in ['Center', 'Amplitude (orig)', 'Area (orig)']:
                 if col in display_df.columns:
                     display_df[col] = display_df[col].apply(lambda x: f"{x:.4e}")
             for col in ['Center (log)', 'Sigma (log)', 'FWHM', 'Fraction (%)']:
@@ -4806,6 +4944,8 @@ elif st.session_state.app_state.current_step == 5:
                     display_df[col] = display_df[col].apply(lambda x: f"{x:.4f}")
             if 'Amplitude (norm)' in display_df.columns:
                 display_df['Amplitude (norm)'] = display_df['Amplitude (norm)'].apply(lambda x: f"{x:.4f}")
+            if 'Area (norm)' in display_df.columns:
+                display_df['Area (norm)'] = display_df['Area (norm)'].apply(lambda x: f"{x:.4f}")
             
             st.dataframe(display_df, use_container_width=True)
             
@@ -4868,11 +5008,12 @@ elif st.session_state.app_state.current_step == 5:
                         'Peak_ID': c['id'],
                         'Center': c['cen_linear'],
                         'Center_log': c['cen_log'],
-                        'Amplitude': c['amp'],
+                        'Amplitude_original': c['amp_original'],
                         'Amplitude_norm': c['amp_norm'],
                         'Sigma_log': c['sigma_log'],
                         'FWHM': c['fwhm'],
-                        'Area': c['area'],
+                        'Area_original': c['area_original'],
+                        'Area_norm': c['area_norm'],
                         'Fraction': c['fraction'],
                         'Fraction_Percent': c['fraction_percent'],
                         'Model': c.get('model_type', 'gaussian'),
@@ -4921,15 +5062,15 @@ elif st.session_state.app_state.current_step == 5:
                         fit_y_norm = deconv.fit_y_norm
                     
                     # Generate normalized fit data
-                    max_amp = max([c['amp'] for c in deconv.components])
+                    max_amp = max([c['amp_original'] for c in deconv.components])
                     
                     df_fit = pd.DataFrame({
                         'X_original': deconv.x_linear,
                         'Y_original': deconv.y_original,
-                        'Y_fit': fit_y_norm * deconv.y_max,
-                        'Y_fit_normalized': fit_y_norm * deconv.y_max / max_amp,
-                        'Residuals': deconv.quality_metrics['Residuals'] * deconv.y_max,
-                        'Residuals_normalized': deconv.quality_metrics['Residuals'] * deconv.y_max / max_amp
+                        'Y_fit': fit_y_norm * deconv.scale_to_original,
+                        'Y_fit_normalized': fit_y_norm * deconv.scale_to_original / max_amp,
+                        'Residuals': deconv.quality_metrics['Residuals'] * deconv.scale_to_original,
+                        'Residuals_normalized': deconv.quality_metrics['Residuals'] * deconv.scale_to_original / max_amp
                     })
                     
                     csv_fit = df_fit.to_csv(index=False)
@@ -4945,7 +5086,7 @@ elif st.session_state.app_state.current_step == 5:
             with col2:
                 # Export report
                 if st.button("📄 Export Detailed Report", use_container_width=True):
-                    max_amp = max([c['amp'] for c in deconv.components])
+                    max_amp = max([c['amp_original'] for c in deconv.components])
                     
                     report = f"""GAUSSIAN DECONVOLUTION REPORT
 {"="*80}
@@ -4960,6 +5101,7 @@ Model type: {deconv.model_type}
 Peak detection method: {deconv.peak_detection_method}
 AIC/BIC control: {deconv.use_aic_bic_control}
 Minimum subtracted: {st.session_state.app_state.minimum_subtracted_value if st.session_state.app_state.subtract_minimum else 'No'}
+Scale factor (normalized -> original): {deconv.scale_to_original:.3f}
 
 QUALITY METRICS:
 {"-"*40}
@@ -4986,7 +5128,7 @@ ID    Center          Amplitude       FWHM        Area           Fraction(%)  Mo
                     
                     for c in deconv.components:
                         model = c.get('model_type', 'gaussian')
-                        report += f"\n{c['id']:<4} {c['cen_linear']:<15.4e} {c['amp']:<15.4e} {c['fwhm']:<12.4f} {c['area']:<15.4e} {c['fraction_percent']:<10.2f} {model}"
+                        report += f"\n{c['id']:<4} {c['cen_linear']:<15.4e} {c['amp_original']:<15.4e} {c['fwhm']:<12.4f} {c['area_original']:<15.4e} {c['fraction_percent']:<10.2f} {model}"
                         if 'eta' in c:
                             report += f" (eta={c['eta']:.3f})"
                         if 'gamma' in c:
@@ -5000,12 +5142,12 @@ ID    Center          Norm. Amplitude    Original Amplitude    Fraction(%)
 {"-"*80}"""
                     
                     for c in deconv.components:
-                        norm_amp = c['amp'] / max_amp
-                        report += f"\n{c['id']:<4} {c['cen_linear']:<15.4e} {norm_amp:<18.4f} {c['amp']:<20.4e} {c['fraction_percent']:<10.2f}"
+                        norm_amp = c['amp_original'] / max_amp
+                        report += f"\n{c['id']:<4} {c['cen_linear']:<15.4e} {norm_amp:<18.4f} {c['amp_original']:<20.4e} {c['fraction_percent']:<10.2f}"
                     
                     report += f"""
 {"="*80}
-Total area: {deconv.total_area:.6e}
+Total area (original scale): {deconv.total_area:.6e}
 Maximum amplitude (for normalization): {max_amp:.6e}
 {"="*80}"""
                     
@@ -5052,7 +5194,7 @@ Maximum amplitude (for normalization): {max_amp:.6e}
                 if st.button("📈 Save Normalized Scale Figure", use_container_width=True):
                     fig_norm, ax_norm = plt.subplots(figsize=(12, 8))
                     
-                    max_amp = max([c['amp'] for c in deconv.components])
+                    max_amp = max([c['amp_original'] for c in deconv.components])
                     
                     if deconv.use_log_x:
                         ax_norm.set_xscale('log')
@@ -5077,7 +5219,7 @@ Maximum amplitude (for normalization): {max_amp:.6e}
                             y_component_norm = GaussianModel.voigt(x_dense_log, c['amp_norm'], 
                                                                   c['cen_log'], c['sigma_log'], gamma)
                         
-                        y_component_norm = y_component_norm * deconv.y_max / max_amp
+                        y_component_norm = y_component_norm * c['amp_original'] / max_amp
                         
                         ax_norm.fill_between(x_dense, 0, y_component_norm, 
                                             color=color, alpha=0.3, linewidth=0)
