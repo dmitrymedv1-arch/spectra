@@ -2311,7 +2311,7 @@ elif st.session_state.app_state.current_step == 2.5:
     with col2:
         st.subheader("Visual Preview")
         
-        if st.session_state.app_state.get('preview_baseline', False):
+        if st.session_state.app_state.preview_baseline:
             x_range = st.session_state.app_state.raw_x
             y_range = st.session_state.app_state.raw_y
             
