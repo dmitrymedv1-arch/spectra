@@ -2095,35 +2095,59 @@ elif st.session_state.app_state.current_step == 2:
         
         n_points = len(st.session_state.app_state.raw_x)
         
-        if st.session_state.app_state.point_range_start is None:
+        # Инициализация отдельного состояния для слайдера
+        if 'slider_range_state' not in st.session_state:
+            if st.session_state.app_state.point_range_start is None:
+                st.session_state.app_state.point_range_start = 0
+            if st.session_state.app_state.point_range_end is None:
+                st.session_state.app_state.point_range_end = n_points - 1
+            st.session_state.slider_range_state = (
+                st.session_state.app_state.point_range_start + 1,
+                st.session_state.app_state.point_range_end + 1
+            )
+        
+        # Проверка на выход за границы
+        if st.session_state.app_state.point_range_start >= n_points:
             st.session_state.app_state.point_range_start = 0
-        if st.session_state.app_state.point_range_end is None:
+            st.session_state.slider_range_state = (1, n_points)
+        if st.session_state.app_state.point_range_end >= n_points:
             st.session_state.app_state.point_range_end = n_points - 1
+            st.session_state.slider_range_state = (1, n_points)
         
         point_range = st.slider(
             "Select point range:",
             min_value=1,
             max_value=n_points,
-            value=(st.session_state.app_state.point_range_start + 1, 
-                   st.session_state.app_state.point_range_end + 1),
+            value=st.session_state.slider_range_state,
             step=1,
+            key="range_selection_slider",
             help="Select range by point index (1-based). This ensures continuous block of points regardless of scale."
         )
         
+        # Обновляем состояние слайдера
+        st.session_state.slider_range_state = point_range
+        
+        # Обновляем app_state
         start_idx = point_range[0] - 1
         end_idx = point_range[1] - 1
         st.session_state.app_state.point_range_start = start_idx
         st.session_state.app_state.point_range_end = end_idx
         
+        # Получаем X значения для отображения информации
         x_selected = st.session_state.app_state.raw_x[start_idx:end_idx+1]
         range_min_linear = float(np.min(x_selected))
         range_max_linear = float(np.max(x_selected))
         
+        # Отображение информации о диапазоне
         if st.session_state.app_state.use_log_x:
-            log_min = np.log10(max(range_min_linear, 1e-12))
-            log_max = np.log10(range_max_linear)
-            st.info(f"X range: {range_min_linear:.3e} - {range_max_linear:.3e} (linear)\n"
-                   f"log₁₀(X) range: {log_min:.2f} - {log_max:.2f}")
+            if range_min_linear > 0:
+                log_min = np.log10(range_min_linear)
+                log_max = np.log10(range_max_linear)
+                st.info(f"X range: {range_min_linear:.3e} - {range_max_linear:.3e} (linear)\n"
+                       f"log₁₀(X) range: {log_min:.2f} - {log_max:.2f}")
+            else:
+                st.warning("X range includes zero or negative values. Log scale may not be appropriate.")
+                st.info(f"X range: {range_min_linear:.3e} - {range_max_linear:.3e}")
         else:
             st.info(f"X range: {range_min_linear:.3e} - {range_max_linear:.3e}")
         
@@ -2142,7 +2166,6 @@ elif st.session_state.app_state.current_step == 2:
                 st.rerun()
         with col_b:
             if st.button("⏭️ Skip Baseline", use_container_width=True):
-                
                 x_range, y_range = DataParser.apply_range_selection(
                     st.session_state.app_state.raw_x,
                     st.session_state.app_state.raw_y,
@@ -2156,7 +2179,6 @@ elif st.session_state.app_state.current_step == 2:
                 st.rerun()
         with col_c:
             if st.button("✅ Apply & Continue", type="primary", use_container_width=True):
-                
                 x_range, y_range = DataParser.apply_range_selection(
                     st.session_state.app_state.raw_x,
                     st.session_state.app_state.raw_y,
@@ -2175,44 +2197,123 @@ elif st.session_state.app_state.current_step == 2:
         plotter = SpectrumPlotter()
         fig, ax = plt.subplots(figsize=(8, 5))
         
-        if 'start_idx' in locals() and 'end_idx' in locals():
-            x_preview, y_preview = DataParser.apply_range_selection(
-                st.session_state.app_state.raw_x,
-                st.session_state.app_state.raw_y,
-                start_idx,
-                end_idx,
-                st.session_state.app_state.use_log_x
-            )
-        else:
-            if st.session_state.app_state.point_range_start is not None:
-                x_preview, y_preview = DataParser.apply_range_selection(
-                    st.session_state.app_state.raw_x,
-                    st.session_state.app_state.raw_y,
-                    st.session_state.app_state.point_range_start,
-                    st.session_state.app_state.point_range_end,
-                    st.session_state.app_state.use_log_x
-                )
-            else:
-                x_preview, y_preview = st.session_state.app_state.raw_x, st.session_state.app_state.raw_y
+        # Используем ПОЛНЫЕ данные для отображения, а не обрезанные
+        x_full = st.session_state.app_state.raw_x
+        y_full = st.session_state.app_state.raw_y
         
+        # Отображаем полные данные
         plotter.plot_raw_data(
-            x_preview, y_preview,
+            x_full, 
+            y_full,
             use_log_x=st.session_state.app_state.use_log_x,
             use_log_y=st.session_state.app_state.use_log_y,
-            title="Selected Range Preview",
+            title="Data with Selected Range Highlighted",
             ax=ax
         )
-
-        if len(x_preview) < len(st.session_state.app_state.raw_x):
-            if len(x_preview) > 0:
-                x_min_selected = np.min(x_preview)
-                x_max_selected = np.max(x_preview)
-                ax.axvspan(x_min_selected, x_max_selected,
-                          alpha=0.2, color='green', label='Selected Range')
+        
+        # Добавляем визуальные индикаторы выбранного диапазона
+        if len(x_full) > 0 and start_idx < len(x_full) and end_idx < len(x_full):
+            # Получаем координаты границ диапазона
+            x_min_selected = x_full[start_idx]
+            x_max_selected = x_full[end_idx]
+            
+            # Получаем Y значения на границах для вертикальных линий
+            y_min_selected = y_full[start_idx]
+            y_max_selected = y_full[end_idx]
+            
+            # Добавляем затененную область для выбранного диапазона
+            ax.axvspan(
+                x_min_selected, 
+                x_max_selected,
+                alpha=0.2, 
+                color='green', 
+                label='Selected Range',
+                zorder=0
+            )
+            
+            # Добавляем вертикальные линии на границах
+            ax.axvline(
+                x=x_min_selected, 
+                color='green', 
+                linestyle='--', 
+                alpha=0.7, 
+                linewidth=1.5,
+                label=f'Start: index {start_idx+1}',
+                zorder=4
+            )
+            ax.axvline(
+                x=x_max_selected, 
+                color='green', 
+                linestyle='--', 
+                alpha=0.7, 
+                linewidth=1.5,
+                label=f'End: index {end_idx+1}',
+                zorder=4
+            )
+            
+            # Добавляем точки на границах
+            ax.plot(
+                x_min_selected, 
+                y_min_selected, 
+                'go', 
+                markersize=8, 
+                markeredgecolor='darkgreen',
+                markerfacecolor='lime',
+                zorder=5,
+                label=f'Start point ({start_idx+1})'
+            )
+            ax.plot(
+                x_max_selected, 
+                y_max_selected, 
+                'go', 
+                markersize=8, 
+                markeredgecolor='darkgreen',
+                markerfacecolor='lime',
+                zorder=5,
+                label=f'End point ({end_idx+1})'
+            )
+            
+            # Добавляем аннотации с информацией о точках
+            ax.annotate(
+                f'Index: {start_idx+1}\nX: {x_min_selected:.3e}\nY: {y_min_selected:.3e}',
+                xy=(x_min_selected, y_min_selected),
+                xytext=(10, 10),
+                textcoords='offset points',
+                fontsize=8,
+                bbox=dict(boxstyle="round,pad=0.3", facecolor='white', alpha=0.9, edgecolor='green'),
+                zorder=6
+            )
+            ax.annotate(
+                f'Index: {end_idx+1}\nX: {x_max_selected:.3e}\nY: {y_max_selected:.3e}',
+                xy=(x_max_selected, y_max_selected),
+                xytext=(-10, -10),
+                textcoords='offset points',
+                fontsize=8,
+                bbox=dict(boxstyle="round,pad=0.3", facecolor='white', alpha=0.9, edgecolor='green'),
+                zorder=6,
+                ha='right',
+                va='top'
+            )
+        
+        # Настраиваем легенду
+        ax.legend(loc='best', fontsize=8, frameon=True, edgecolor='black')
+        
+        # Добавляем информацию о количестве точек
+        ax.text(
+            0.02, 
+            0.02, 
+            f'Total points: {len(x_full)}\nSelected: {end_idx - start_idx + 1} points ({((end_idx - start_idx + 1)/len(x_full)*100):.1f}%)',
+            transform=ax.transAxes,
+            fontsize=9,
+            verticalalignment='bottom',
+            bbox=dict(boxstyle="round,pad=0.3", facecolor='white', alpha=0.8, edgecolor='gray')
+        )
+        
+        # Применяем научный стиль
+        plotter._apply_scientific_style(ax)
         
         st.pyplot(fig)
         plt.close()
-
 
 # ==================== STEP 2.5: BASELINE CORRECTION ====================
 
