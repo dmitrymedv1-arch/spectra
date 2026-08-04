@@ -4,10 +4,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from scipy.signal import savgol_filter, find_peaks, peak_widths
 from scipy.optimize import curve_fit, least_squares
-from scipy.ndimage import gaussian_filter1d, grey_erosion, grey_dilation, uniform_filter1d
-from scipy.sparse import diags, identity
-from scipy.sparse.linalg import spsolve
-from scipy.stats import skew, kurtosis
+from scipy.ndimage import gaussian_filter1d
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import re
@@ -42,34 +39,23 @@ class AppState:
     point_range_end: Optional[int] = None
     clip_negative: bool = True
     fitting_method: str = 'trf'
-    max_nfev: int = 5000
+    max_nfev: int = 5000  # Уменьшено с 10000 для скорости
     show_warnings: bool = True
-    baseline_method: str = 'none'
+    baseline_method: str = 'none'  # 'none', 'constant', 'linear', 'quadratic'
     baseline_degree: int = 1
-    fit_quality: str = 'balanced'
-    last_popt: Optional[np.ndarray] = None
-    pending_split: Optional[Tuple[int, float]] = None
+    fit_quality: str = 'balanced'  # 'fast', 'balanced', 'precise'
+    last_popt: Optional[np.ndarray] = None  # Кэш последних параметров
+    pending_split: Optional[Tuple[int, float]] = None  # Ожидающие операции
     pending_remove: Optional[int] = None
     preview_mode: bool = False
-    smoothing_level: str = 'none'
-    manual_peaks: List[Dict] = field(default_factory=list)
-    residuals_peaks: List[Dict] = field(default_factory=list)
-    peak_sources: Dict[int, str] = field(default_factory=dict)
-    manual_peak_position: Optional[float] = None
-    show_smoothing_preview: bool = False
-    auto_smooth_suggested: bool = False
-    
-    # NEW: Baseline correction fields
-    baseline_corrector: Optional['BaselineCorrector'] = None
-    baseline_corrected_y: Optional[np.ndarray] = None
-    baseline_curve: Optional[np.ndarray] = None
-    baseline_params: Dict = field(default_factory=dict)
-    preview_baseline: bool = False
-    baseline_lam: float = 1e5
-    baseline_p: float = 0.01
-    baseline_half_window: int = 30
-    baseline_poly_order: int = 5
-    baseline_num_std: float = 3.0
+    # Новые атрибуты для сглаживания и ручного добавления пиков
+    smoothing_level: str = 'none'  # 'none', 'light', 'medium', 'strong', 'adaptive'
+    manual_peaks: List[Dict] = field(default_factory=list)  # Вручную добавленные пики
+    residuals_peaks: List[Dict] = field(default_factory=list)  # Пики, найденные по остаткам
+    peak_sources: Dict[int, str] = field(default_factory=dict)  # Источник каждого пика (auto/manual/residuals)
+    manual_peak_position: Optional[float] = None  # Текущая позиция для ручного добавления
+    show_smoothing_preview: bool = False  # Показывать превью сглаживания
+    auto_smooth_suggested: bool = False  # Предложение включить сглаживание
 
 # Initialize session state with dataclass
 if 'app_state' not in st.session_state:
@@ -87,16 +73,21 @@ st.set_page_config(
 # Scientific plot style
 plt.style.use('default')
 plt.rcParams.update({
+    # Font sizes and weights
     'font.size': 10,
     'font.family': 'serif',
     'axes.labelsize': 11,
     'axes.labelweight': 'bold',
     'axes.titlesize': 12,
     'axes.titleweight': 'bold',
+    
+    # Axes appearance
     'axes.facecolor': 'white',
     'axes.edgecolor': 'black',
     'axes.linewidth': 1.0,
     'axes.grid': False,
+    
+    # Tick parameters
     'xtick.color': 'black',
     'ytick.color': 'black',
     'xtick.labelsize': 10,
@@ -105,23 +96,32 @@ plt.rcParams.update({
     'ytick.direction': 'out',
     'xtick.major.size': 4,
     'xtick.minor.size': 2,
+    'ytick.major.size': 4,
+    'ytick.minor.size': 2,
+    'xtick.major.width': 0.8,
     'ytick.major.width': 0.8,
-    'ytick.minor.width': 0.8,
+    
+    # Legend
     'legend.fontsize': 10,
     'legend.frameon': True,
     'legend.framealpha': 0.9,
     'legend.edgecolor': 'black',
     'legend.fancybox': False,
+    
+    # Figure
     'figure.dpi': 600,
     'savefig.dpi': 600,
     'savefig.bbox': 'tight',
     'savefig.pad_inches': 0.1,
     'figure.facecolor': 'white',
+    
+    # Lines
     'lines.linewidth': 1.5,
     'lines.markersize': 6,
     'errorbar.capsize': 3,
 })
 
+# Title
 st.title("📊 Gaussian Deconvolution of Spectral Data")
 st.markdown("---")
 
@@ -142,6 +142,7 @@ class DataParser:
             if not line or line.startswith(('#', '//', ';')):
                 continue
             
+            # Split by any whitespace or commas
             parts = re.split(r'[,\s]+', line)
             parts = [p for p in parts if p.strip()]
             
@@ -184,9 +185,11 @@ class DataParser:
         if start_idx is None or end_idx is None:
             return x, y
         
+        # Ensure indices are within bounds
         start_idx = max(0, min(start_idx, len(x) - 1))
         end_idx = max(0, min(end_idx, len(x) - 1))
         
+        # Select by indices (continuous block of points)
         if start_idx <= end_idx:
             mask = np.zeros(len(x), dtype=bool)
             mask[start_idx:end_idx+1] = True
@@ -211,6 +214,7 @@ class DataPreprocessor:
         if level == 'none' or len(y) < 5:
             return y
         
+        # Determine window size based on level and data length
         n_points = len(y)
         if level == 'light':
             window = min(5, n_points - 1 if n_points % 2 == 0 else n_points)
@@ -219,6 +223,7 @@ class DataPreprocessor:
         elif level == 'strong':
             window = min(21, n_points - 1 if n_points % 2 == 0 else n_points)
         elif level == 'adaptive':
+            # Adaptive smoothing: larger window for noisier regions
             noise_estimate = np.std(np.diff(y)) / np.mean(np.abs(y)) if np.mean(np.abs(y)) > 0 else 1
             if noise_estimate > 0.5:
                 window = min(21, n_points - 1 if n_points % 2 == 0 else n_points)
@@ -229,6 +234,7 @@ class DataPreprocessor:
         else:
             return y
         
+        # Ensure window is odd
         if window % 2 == 0:
             window += 1
         
@@ -246,10 +252,12 @@ class DataPreprocessor:
     
     def preprocess_for_fitting(self, x_linear, y_original, use_log_x, use_log_y, smoothing_level='none'):
         """Preprocess data for fitting with proper handling of edge cases"""
+        # Sort by X to ensure monotonic increasing X
         sort_idx = np.argsort(x_linear)
         x_sorted = x_linear[sort_idx]
         y_sorted = y_original[sort_idx]
         
+        # Handle negative values
         if self.clip_negative:
             negative_mask = y_sorted < 0
             self.clipped_points = np.sum(negative_mask)
@@ -259,16 +267,20 @@ class DataPreprocessor:
         else:
             y_for_fitting = y_sorted
         
+        # Apply smoothing if requested
         if smoothing_level != 'none':
             y_for_fitting = self.smooth_data(x_sorted, y_for_fitting, 'savgol', smoothing_level, use_log_x)
         
-        eps = np.finfo(float).eps
+        # Small epsilon for log transformations
+        eps = np.finfo(float).eps  # Use machine epsilon instead of 1e-12
         
+        # Check for very small values when using log
         if use_log_y and np.any(y_for_fitting < eps * 100):
             self.small_values_warning = True
             if self.show_warnings:
                 warnings.warn("Very small Y values detected. Log transformation may cause artifacts.")
         
+        # Apply logarithmic transformations
         if use_log_x:
             x_pos = np.maximum(x_sorted, eps)
             x = np.log10(x_pos)
@@ -308,15 +320,18 @@ class DerivativeAnalyzer:
             window_length = len(x) if len(x) % 2 == 1 else len(x) - 1
         
         if window_length < polyorder + 2:
+            # Fallback to simple gradient
             dy = np.gradient(y, x)
             d2y = np.gradient(dy, x)
             return dy, d2y, y
         
         try:
+            # Savitzky-Golay smoothing
             y_smooth = savgol_filter(y, window_length, polyorder)
             dy = savgol_filter(y, window_length, polyorder, deriv=1, delta=np.mean(np.diff(x)))
             d2y = savgol_filter(y, window_length, polyorder, deriv=2, delta=np.mean(np.diff(x)))
         except Exception as e:
+            # Fallback to simple gradient if Savgol fails
             warnings.warn(f"Savitzky-Golay failed, using simple gradient: {e}")
             y_smooth = y
             dy = np.gradient(y, x)
@@ -334,140 +349,6 @@ class DerivativeAnalyzer:
                     if y[i] > threshold * np.max(y):
                         peaks.append(i)
         return peaks
-
-
-class BaselineCorrector:
-    """Advanced baseline corrector with support for pybaselines methods"""
-    
-    def __init__(self, method='none', **kwargs):
-        self.method = method
-        self.kwargs = kwargs
-        self.baseline = None
-        self.corrected = None
-        self.mask = None
-        self.weights = None
-        self.history = []
-        self.info = {}
-        
-    def correct(self, x, y):
-        """Apply baseline correction with selected method"""
-        if self.method == 'none':
-            self.baseline = np.zeros_like(y)
-            self.corrected = y.copy()
-            return self.corrected, self.baseline, {}
-        
-        try:
-            from pybaselines import Baseline
-            baseline = Baseline(x_data=x, check_finite=False)
-            
-            lam = self.kwargs.get('lam', 1e5)
-            p = self.kwargs.get('p', 0.01)
-            half_window = self.kwargs.get('half_window', 30)
-            
-            methods = {
-                'asls': (baseline.asls, {'lam': lam, 'p': p}),
-                'airpls': (baseline.airpls, {'lam': lam}),
-                'arpls': (baseline.arpls, {'lam': lam}),
-                'drpls': (baseline.drpls, {'lam': lam}),
-                'iarpls': (baseline.iarpls, {'lam': lam}),
-                'psalsa': (baseline.psalsa, {'lam': lam, 'p': p}),
-                'derpsalsa': (baseline.derpsalsa, {'lam': lam, 'p': p}),
-                'mor': (baseline.mor, {'half_window': half_window}),
-                'imor': (baseline.imor, {'half_window': half_window, 'tol': 1e-3, 'max_iter': 200}),
-                'rolling_ball': (baseline.rolling_ball, {'half_window': half_window}),
-                'rubberband': (baseline.rubberband, {'segments': 1, 'lam': lam}),
-                'dietrich': (baseline.dietrich, {'poly_order': 5, 'num_std': 3.0}),
-                'golotvin': (baseline.golotvin, {'half_window': half_window, 'num_std': 2.0}),
-                'pspline_asls': (baseline.pspline_asls, {'lam': lam, 'p': p, 'num_knots': 100}),
-                'snip': (baseline.snip, {'max_half_window': half_window}),
-            }
-            
-            if self.method in methods:
-                func, params = methods[self.method]
-                result, info = func(y, **params)
-                self.baseline = result
-                self.info = info
-                self.corrected = y - result
-                
-                if self.method in ['dietrich', 'golotvin'] and 'mask' in info:
-                    self.mask = info['mask']
-                
-                if 'weights' in info:
-                    self.weights = info['weights']
-                
-                return self.corrected, self.baseline, info
-            else:
-                return y, np.zeros_like(y), {}
-                
-        except ImportError:
-            st.warning("pybaselines not installed. Using fallback methods.")
-            return self._fallback_correction(x, y)
-        except Exception as e:
-            st.warning(f"Baseline correction failed: {e}")
-            return y, np.zeros_like(y), {'error': str(e)}
-    
-    def _fallback_correction(self, x, y):
-        """Fallback methods without pybaselines"""
-        if self.method == 'dietrich':
-            from scipy.ndimage import uniform_filter1d
-            smooth_y = uniform_filter1d(y, 2 * 30 + 1)
-            power = np.gradient(smooth_y)**2
-            threshold = np.mean(power) + 3.0 * np.std(power, ddof=1)
-            mask = power < threshold
-            
-            if np.sum(mask) > 0:
-                baseline = np.interp(x, x[mask], y[mask])
-            else:
-                baseline = np.polyval(np.polyfit(x, y, 2), x)
-            
-            self.mask = mask
-            self.baseline = baseline
-            self.corrected = y - baseline
-            return self.corrected, baseline, {'mask': mask}
-        
-        elif self.method == 'rolling_ball':
-            from scipy.ndimage import grey_erosion, grey_dilation
-            window = 2 * 30 + 1
-            baseline = grey_erosion(y, window)
-            baseline = grey_dilation(baseline, window)
-            self.baseline = baseline
-            self.corrected = y - baseline
-            return self.corrected, baseline, {}
-        
-        else:
-            degree = {'constant': 0, 'linear': 1, 'quadratic': 2}.get(self.method, 2)
-            coeffs = np.polyfit(x, y, degree)
-            baseline = np.polyval(coeffs, x)
-            self.baseline = baseline
-            self.corrected = y - baseline
-            return self.corrected, baseline, {}
-    
-    @staticmethod
-    def get_quality_metrics(y, baseline):
-        """Calculate quality metrics for baseline correction"""
-        residuals = y - baseline
-        
-        metrics = {
-            'rmse': np.sqrt(np.mean(residuals**2)),
-            'mae': np.mean(np.abs(residuals)),
-            'max_residual': np.max(np.abs(residuals)),
-            'min_residual': np.min(residuals),
-            'std_residual': np.std(residuals),
-            'mean_residual': np.mean(residuals),
-            'negative_fraction': np.mean(residuals < 0) * 100,
-            'positive_fraction': np.mean(residuals > 0) * 100,
-        }
-        
-        if len(residuals) > 0:
-            from scipy.stats import skew, kurtosis
-            metrics['skewness'] = skew(residuals)
-            metrics['kurtosis'] = kurtosis(residuals)
-        
-        signal = np.mean(y[residuals > 0]) if np.any(residuals > 0) else 0
-        noise = np.std(residuals)
-        metrics['snr'] = signal / noise if noise > 0 else float('inf')
-        
-        return metrics
 
 
 class GaussianModel:
@@ -493,6 +374,7 @@ class GaussianModel:
     @staticmethod
     def multi_gaussian_with_baseline(x, n_peaks, peak_params, baseline_params, baseline_method):
         """Sum of Gaussians with baseline correction"""
+        # Calculate peaks
         y_peaks = np.zeros_like(x, dtype=float)
         for i in range(n_peaks):
             amp = peak_params[3*i]
@@ -500,6 +382,7 @@ class GaussianModel:
             sigma = abs(peak_params[3*i + 2])
             y_peaks += GaussianModel.gaussian(x, amp, cen, sigma)
         
+        # Calculate baseline
         if baseline_method == "constant" and len(baseline_params) >= 1:
             y_baseline = baseline_params[0]
         elif baseline_method == "linear" and len(baseline_params) >= 2:
@@ -552,19 +435,23 @@ class GaussianModel:
             sigma = fwhm / (2 * np.sqrt(2 * np.log(2)))
             return sigma
         except Exception as e:
+            # Fallback: estimate from distance to nearest minimum
             left_min = peak_idx
             right_min = peak_idx
             
+            # Find left minimum
             for i in range(peak_idx - 1, 0, -1):
                 if y[i] < y[i-1] and y[i] < y[i+1]:
                     left_min = i
                     break
             
+            # Find right minimum
             for i in range(peak_idx + 1, len(y) - 1):
                 if y[i] < y[i-1] and y[i] < y[i+1]:
                     right_min = i
                     break
             
+            # Estimate sigma as 1/3 of the width to nearest minima
             width = (right_min - left_min) * np.mean(np.diff(x))
             sigma = width / 3.0
             return max(sigma, 0.01 * (np.max(x) - np.min(x)) / 10)
@@ -579,18 +466,23 @@ class FitQualityAnalyzer:
         residuals = y_true - y_pred
         n = len(y_true)
         
+        # R-squared
         ss_res = np.sum(residuals**2)
         ss_tot = np.sum((y_true - np.mean(y_true))**2)
         r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
         
+        # AIC and BIC
         rss = ss_res
         aic = n * np.log(rss/n) + 2 * n_params if rss > 0 else -np.inf
         bic = n * np.log(rss/n) + n_params * np.log(n) if rss > 0 else -np.inf
         
+        # Chi-squared (reduced)
         chi_squared = rss / (n - n_params) if n > n_params else np.inf
         
+        # Maximum error
         max_error = np.max(np.abs(residuals))
         
+        # Root mean square error
         rmse = np.sqrt(np.mean(residuals**2))
         
         return {
@@ -628,6 +520,7 @@ class GaussianFitter:
         self.convergence_history = []
         self.fit_progress = 0
         
+        # Set tolerances based on quality
         if fit_quality == 'fast':
             self.xtol = 1e-3
             self.ftol = 1e-3
@@ -636,7 +529,7 @@ class GaussianFitter:
             self.xtol = 1e-5
             self.ftol = 1e-5
             self.gtol = 1e-5
-        else:
+        else:  # precise
             self.xtol = 1e-8
             self.ftol = 1e-8
             self.gtol = 1e-8
@@ -656,38 +549,45 @@ class GaussianFitter:
         n_peaks = len(initial_peak_params) // 3
         n_baseline = self.get_n_baseline_params()
         
+        # Use last good parameters if available (but keep same structure)
         if self.last_popt is not None:
+            # Check if structure matches (same number of peaks and baseline)
             expected_len = n_peaks * 3 + n_baseline
             if len(self.last_popt) == expected_len:
                 initial_params = self.last_popt.copy()
                 if progress_callback:
                     progress_callback(0.1, "Using cached parameters...")
             else:
+                # Structure changed, use initial
                 initial_params = np.array(initial_peak_params)
                 if n_baseline > 0:
+                    # Add initial baseline estimates
                     if self.baseline_method == 'constant':
-                        baseline_init = [np.percentile(y_norm, 5)]
+                        baseline_init = [np.percentile(y_norm, 5)]  # 5th percentile as baseline
                     elif self.baseline_method == 'linear':
                         baseline_init = [np.percentile(y_norm, 5), 0]
-                    else:
+                    else:  # quadratic
                         baseline_init = [np.percentile(y_norm, 5), 0, 0]
                     initial_params = np.concatenate([initial_params, baseline_init])
         else:
             initial_params = np.array(initial_peak_params)
             if n_baseline > 0:
+                # Add initial baseline estimates
                 if self.baseline_method == 'constant':
                     baseline_init = [np.percentile(y_norm, 5)]
                 elif self.baseline_method == 'linear':
                     baseline_init = [np.percentile(y_norm, 5), 0]
-                else:
+                else:  # quadratic
                     baseline_init = [np.percentile(y_norm, 5), 0, 0]
                 initial_params = np.concatenate([initial_params, baseline_init])
         
         if len(initial_params) == 0:
             return False, None, None, None
         
+        # Create bounds
         lower_bounds, upper_bounds = self._create_bounds(x, y_norm, n_peaks, n_baseline)
         
+        # Ensure initial_params are within bounds
         for i in range(len(initial_params)):
             initial_params[i] = np.clip(initial_params[i], lower_bounds[i], upper_bounds[i])
         
@@ -695,11 +595,13 @@ class GaussianFitter:
             if progress_callback:
                 progress_callback(0.3, "Initializing fit...")
             
+            # Create the model function with correct number of parameters
             def model_func(x, *params):
                 return GaussianModel.multi_gaussian_with_baseline_flat(
                     x, *params, n_peaks=n_peaks, baseline_method=self.baseline_method
                 )
             
+            # Perform fit with selected method and tolerances
             popt, pcov = curve_fit(
                 model_func,
                 x,
@@ -718,9 +620,11 @@ class GaussianFitter:
             
             fit_y_norm = model_func(x, *popt)
             
+            # Extract peak parameters
             peak_params = popt[:n_peaks*3]
             baseline_params = popt[n_peaks*3:] if n_baseline > 0 else []
             
+            # Extract components
             components = []
             for i in range(n_peaks):
                 amp_norm = peak_params[3*i]
@@ -732,7 +636,8 @@ class GaussianFitter:
                 
                 component_y_norm = GaussianModel.gaussian(x, amp_norm, cen, sigma)
                 
-                if hasattr(x, 'min') and hasattr(x, 'max'):
+                # Calculate center in linear space
+                if hasattr(x, 'min') and hasattr(x, 'max'):  # Simple check
                     cen_linear = 10**cen if np.any(x < 0) else cen
                 else:
                     cen_linear = cen
@@ -750,6 +655,7 @@ class GaussianFitter:
                     'y_norm': component_y_norm
                 })
             
+            # Calculate fractions
             total_area = sum([c['area'] for c in components])
             for c in components:
                 c['fraction'] = c['area'] / total_area if total_area > 0 else 0
@@ -772,17 +678,19 @@ class GaussianFitter:
         x_range = np.max(x) - np.min(x)
         y_range = np.max(y_norm) - np.min(y_norm)
         
+        # Peak bounds
         for i in range(n_peaks):
             lower_bounds.extend([0, np.min(x), x_range * 0.001])
             upper_bounds.extend([2 * np.max(y_norm), np.max(x), x_range * 0.5])
         
-        if n_baseline >= 1:
+        # Baseline bounds
+        if n_baseline >= 1:  # constant
             lower_bounds.append(-np.max(y_norm))
             upper_bounds.append(np.max(y_norm))
-        if n_baseline >= 2:
+        if n_baseline >= 2:  # linear term
             lower_bounds.append(-x_range)
             upper_bounds.append(x_range)
-        if n_baseline >= 3:
+        if n_baseline >= 3:  # quadratic term
             lower_bounds.append(-x_range**2)
             upper_bounds.append(x_range**2)
         
@@ -794,13 +702,15 @@ class GaussianFitter:
         n_baseline = self.get_n_baseline_params()
         
         if baseline_params is None and n_baseline > 0:
+            # Use default baseline
             if self.baseline_method == 'constant':
                 baseline_params = [0]
             elif self.baseline_method == 'linear':
                 baseline_params = [0, 0]
-            else:
+            else:  # quadratic
                 baseline_params = [0, 0, 0]
         
+        # Calculate fit
         fit_y_norm = GaussianModel.multi_gaussian_with_baseline(
             x, n_peaks, peak_params, baseline_params or [], self.baseline_method
         )
@@ -822,20 +732,24 @@ class SpectrumPlotter:
         else:
             fig = ax.figure
         
+        # Apply scales
         if use_log_x:
             ax.set_xscale('log')
         if use_log_y:
             ax.set_yscale('log')
         
+        # Plot data
         ax.plot(x, y, 'o-', markersize=3, linewidth=1, alpha=0.7, 
                 color='black', label='Data', zorder=1)
         
+        # Labels and title
         x_label = 'X' + (' (log scale)' if use_log_x else '')
         y_label = 'Y' + (' (log scale)' if use_log_y else '')
         ax.set_xlabel(x_label, fontsize=12, fontweight='bold')
         ax.set_ylabel(y_label, fontsize=12, fontweight='bold')
         ax.set_title(title, fontsize=14, fontweight='bold')
         
+        # Grid and styling
         ax.grid(True, alpha=0.3, linestyle='--')
         
         if self.scientific_style:
@@ -852,15 +766,18 @@ class SpectrumPlotter:
         else:
             fig = ax.figure
         
+        # Apply scales
         if deconvolver.use_log_x:
             ax.set_xscale('log')
         if deconvolver.use_log_y:
             ax.set_yscale('log')
         
+        # Plot original data
         ax.plot(deconvolver.x_sorted, deconvolver.y_sorted, 
                 'o-', markersize=3, linewidth=1, alpha=0.7, 
                 label='Original Data', color='black', zorder=1)
         
+        # Plot smoothed data (converted back to original scale)
         if deconvolver.use_log_y:
             y_smooth_original = 10**(y_smooth * deconvolver.y_max)
         else:
@@ -869,12 +786,14 @@ class SpectrumPlotter:
         ax.plot(deconvolver.x_sorted, y_smooth_original, 
                 'r-', linewidth=2, label='Smoothed', color='red', zorder=2)
         
+        # Color mapping for peak sources
         source_colors = {
             'auto': 'green',
             'manual': 'orange',
             'residuals': 'blue'
         }
         
+        # Mark detected peaks with source-based colors
         for i, info in enumerate(peak_info):
             source = info.get('source', 'auto')
             color = source_colors.get(source, 'green')
@@ -891,23 +810,29 @@ class SpectrumPlotter:
                                           facecolor='white', alpha=0.8),
                     zorder=4)
         
+        # Show manual peak position indicator if provided
         if manual_peak_position is not None:
+            # Find Y value at this position
             idx = np.argmin(np.abs(deconvolver.x_sorted - manual_peak_position))
             y_at_position = deconvolver.y_sorted[idx]
             
+            # Draw vertical line
             ax.axvline(x=manual_peak_position, color='red', linestyle='--', 
                       linewidth=1.5, alpha=0.7, label='Selected position')
             
+            # Draw red dot at the position
             ax.plot(manual_peak_position, y_at_position, 'ro', 
                    markersize=10, markeredgecolor='darkred', 
                    markerfacecolor='red', zorder=5)
             
+            # Add annotation
             ax.annotate(f'X: {manual_peak_position:.3e}\nY: {y_at_position:.3e}',
                        xy=(manual_peak_position, y_at_position),
                        xytext=(10, 10), textcoords='offset points',
                        fontsize=10, bbox=dict(boxstyle="round,pad=0.3", 
                                              facecolor='yellow', alpha=0.8))
         
+        # Add legend for peak sources if available
         if any(info.get('source', 'auto') != 'auto' for info in peak_info):
             from matplotlib.patches import Patch
             legend_elements = [
@@ -917,12 +842,14 @@ class SpectrumPlotter:
             ]
             ax.legend(handles=legend_elements, loc='upper right', fontsize=9)
         
+        # Labels and title
         x_label = 'X' + (' (log scale)' if deconvolver.use_log_x else '')
         y_label = 'Y' + (' (log scale)' if deconvolver.use_log_y else '')
         ax.set_xlabel(x_label, fontsize=12, fontweight='bold')
         ax.set_ylabel(y_label, fontsize=12, fontweight='bold')
         ax.set_title(title, fontsize=14, fontweight='bold')
         
+        # Legend and grid
         ax.legend(loc='best', fontsize=10, frameon=True, edgecolor='black')
         ax.grid(True, alpha=0.3, linestyle='--')
         
@@ -940,14 +867,17 @@ class SpectrumPlotter:
         else:
             fig = ax.figure
         
+        # Apply scales
         if deconvolver.use_log_x:
             ax.set_xscale('log')
         if deconvolver.use_log_y:
             ax.set_yscale('log')
         
+        # Plot original data
         ax.scatter(deconvolver.x_linear, deconvolver.y_original, 
                    s=10, alpha=0.5, color='black', label='Data', zorder=1)
         
+        # Generate dense x for smooth curves
         if deconvolver.use_log_x:
             x_min = np.maximum(np.min(deconvolver.x_linear[deconvolver.x_linear>0]), np.finfo(float).eps)
             x_max = np.max(deconvolver.x_linear)
@@ -958,18 +888,22 @@ class SpectrumPlotter:
                                   np.max(deconvolver.x_linear), 2000)
             x_dense_log = x_dense
         
+        # Plot components
         if show_components and deconvolver.components:
             colors = plt.cm.Set3(np.linspace(0, 1, len(deconvolver.components)))
             for c, color in zip(deconvolver.components, colors):
                 y_component = GaussianModel.gaussian(x_dense_log, c['amp_norm'], 
                                                     c['cen_log'], c['sigma_log']) * deconvolver.y_max
                 
+                # Fill under Gaussian
                 ax.fill_between(x_dense, 0, y_component, 
                                 color=color, alpha=0.3, linewidth=0)
                 
+                # Plot line
                 ax.plot(x_dense, y_component, '-', color=color, linewidth=2,
                        label=f'Peak {c["id"]}: {c["fraction_percent"]:.1f}%', zorder=2)
         
+        # Plot baseline if available
         if show_baseline and hasattr(deconvolver, 'baseline_params') and deconvolver.baseline_params:
             if deconvolver.baseline_method == 'constant':
                 y_baseline = deconvolver.baseline_params[0] * deconvolver.y_max
@@ -987,11 +921,13 @@ class SpectrumPlotter:
                 ax.plot(x_dense, y_baseline, 'gray', linestyle=':', 
                        linewidth=1.5, label='Baseline', zorder=1)
         
+        # Plot total fit
         if preview_mode and preview_fit is not None:
             y_total = preview_fit * deconvolver.y_max
             ax.plot(x_dense, y_total, 'b--', linewidth=2, 
                    label='Preview (no fit)', zorder=3, alpha=0.7)
         elif deconvolver.fit_y_norm is not None:
+            # Reconstruct total fit with baseline
             if hasattr(deconvolver, 'baseline_params') and deconvolver.baseline_params:
                 n_peaks = len(deconvolver.components)
                 peak_params = []
@@ -1007,12 +943,14 @@ class SpectrumPlotter:
             
             ax.plot(x_dense, y_total, 'r--', linewidth=2, label='Total Fit', zorder=3)
         
+        # Labels and title
         x_label = 'X' + (' (log scale)' if deconvolver.use_log_x else '')
         y_label = 'Y' + (' (log scale)' if deconvolver.use_log_y else '')
         ax.set_xlabel(x_label, fontsize=12, fontweight='bold')
         ax.set_ylabel(y_label, fontsize=12, fontweight='bold')
         ax.set_title(title, fontsize=14, fontweight='bold')
         
+        # Add quality metrics to plot if available
         if deconvolver.quality_metrics and not preview_mode:
             metrics_text = f"R² = {deconvolver.quality_metrics.get('R²', 0):.4f}\n"
             metrics_text += f"RMSE = {deconvolver.quality_metrics.get('RMSE', 0):.2e}"
@@ -1024,6 +962,7 @@ class SpectrumPlotter:
                    transform=ax.transAxes, fontsize=10, verticalalignment='top',
                    bbox=dict(boxstyle="round,pad=0.3", facecolor='yellow', alpha=0.8))
         
+        # Legend and grid
         ax.legend(loc='upper right', fontsize=8, frameon=True, edgecolor='black')
         ax.grid(True, alpha=0.3, linestyle='--')
         
@@ -1051,23 +990,26 @@ class PeakVisualizer:
         """Plot peaks using original Y scale instead of normalized"""
         fig, ax = plt.subplots(figsize=(10, 5))
         
+        # Use original Y values, not normalized
         ax.plot(deconvolver.x, deconvolver.y, 
                'o-', markersize=3, alpha=0.5, label='Data', color='black')
         ax.plot(deconvolver.x, y_smooth * deconvolver.y_max, 
                'r-', linewidth=2, label='Smoothed')
         
         for i, info in enumerate(peak_info):
+            # Use original Y value
             ax.plot(info['x'], info['y'] * deconvolver.y_max, 'ro', 
                    markersize=8, markeredgecolor='darkred')
             ax.text(info['x'], info['y'] * deconvolver.y_max * 1.05, 
                    f'{i+1}', ha='center', fontweight='bold')
         
         ax.set_xlabel(deconvolver.x_label)
-        ax.set_ylabel(deconvolver.y_label)
+        ax.set_ylabel(deconvolver.y_label)  # Original Y label
         ax.set_title('Detected Peaks (Original Scale)')
         ax.legend()
         ax.grid(True, alpha=0.3)
         
+        # Scientific styling
         ax.spines['top'].set_visible(True)
         ax.spines['right'].set_visible(True)
         ax.spines['bottom'].set_linewidth(1)
@@ -1084,45 +1026,35 @@ class GaussianDeconvolver:
     
     def __init__(self, x_linear, y_original, use_log_x=True, use_log_y=False,
                  clip_negative=True, show_warnings=True, baseline_method='none',
-                 smoothing_level='none', baseline_params=None):
-        
+                 smoothing_level='none'):
+        # Store original data WITHOUT ANY MODIFICATIONS for display purposes
         self.x_original = np.array(x_linear).copy()
         self.y_original_raw = np.array(y_original).copy()
         
-        self.baseline_curve = np.zeros_like(y_original)
-        self.baseline_info = {}
-        self.baseline_mask = None
-        self.baseline_corrected = False
-        self.baseline_method = baseline_method
-        
-        if baseline_method != 'none' and baseline_params:
-            corrector = BaselineCorrector(baseline_method, **baseline_params)
-            y_corrected, baseline, info = corrector.correct(x_linear, y_original)
-            
-            self.baseline_curve = baseline
-            self.baseline_info = info
-            self.baseline_mask = corrector.mask
-            self.baseline_corrected = True
-            y_original = y_corrected
-        
+        # Working arrays that may be modified
         self.x_linear = np.array(x_linear)
         self.y_original = np.array(y_original)
         self.use_log_x = use_log_x
         self.use_log_y = use_log_y
+        self.baseline_method = baseline_method
         self.smoothing_level = smoothing_level
         
+        # Sort by X to ensure monotonic increasing X
         sort_idx = np.argsort(self.x_linear)
         self.x_linear = self.x_linear[sort_idx]
         self.y_original = self.y_original[sort_idx]
         
+        # Store sorted original data for display
         self.x_sorted = self.x_linear.copy()
         self.y_sorted = self.y_original.copy()
         
+        # Preprocess data
         self.preprocessor = DataPreprocessor(clip_negative, show_warnings)
         preprocessed = self.preprocessor.preprocess_for_fitting(
             self.x_linear, self.y_original, use_log_x, use_log_y, smoothing_level
         )
         
+        # Update with preprocessed data
         self.x_sorted = preprocessed['x_sorted']
         self.y_sorted = preprocessed['y_sorted']
         self.x = preprocessed['x']
@@ -1133,13 +1065,16 @@ class GaussianDeconvolver:
         self.clipped_points = preprocessed['clipped_points']
         self.small_values_warning = preprocessed['small_values_warning']
         
+        # Normalization - use 95th percentile instead of max for robustness
         self.y_max = np.percentile(self.y_for_fitting, 95) if np.any(self.y_for_fitting > 0) else 1.0
         
+        # For fitting, we normalize but keep track for denormalization
         if self.y_max > 0:
             self.y_norm = self.y / self.y_max
         else:
             self.y_norm = self.y
         
+        # Results containers
         self.components = []
         self.fit_y_norm = None
         self.popt = None
@@ -1148,13 +1083,16 @@ class GaussianDeconvolver:
         self.convergence_history = []
         self.total_area = 0
         
+        # Fitter
         self.fitter = None
         
+        # For compatibility with existing code
         self.multi_gaussian = GaussianModel.multi_gaussian
         self.gaussian = GaussianModel.gaussian
     
     def auto_detect_peaks(self, sensitivity=0.03, min_distance=5):
         """Automatic peak detection using derivatives"""
+        # Smoothing
         window_length = min(11, len(self.y_norm) // 5 * 2 + 1)
         if window_length % 2 == 0:
             window_length += 1
@@ -1164,19 +1102,24 @@ class GaussianDeconvolver:
         else:
             y_smooth = self.y_norm
         
+        # Calculate derivatives
         dy, d2y, y_smooth = DerivativeAnalyzer.calculate_derivatives(self.x, y_smooth)
         
+        # Peak search with different methods
         height_threshold = sensitivity * np.max(y_smooth)
         peaks1, _ = find_peaks(y_smooth, height=height_threshold, distance=min_distance)
         peaks2 = DerivativeAnalyzer.find_peaks_by_derivatives(self.x, y_smooth, dy, d2y, sensitivity)
         
+        # Combine results
         all_peaks = sorted(set(np.concatenate([peaks1, peaks2])))
         
+        # Filter close peaks
         filtered_peaks = []
         for peak in all_peaks:
             if not filtered_peaks or abs(self.x[peak] - self.x[filtered_peaks[-1]]) > min_distance * np.mean(np.diff(self.x)):
                 filtered_peaks.append(peak)
         
+        # Estimate parameters
         peak_info = []
         initial_params = []
         
@@ -1184,14 +1127,17 @@ class GaussianDeconvolver:
             cen = self.x[peak_idx]
             amp = y_smooth[peak_idx]
             
+            # Estimate sigma with fallback
             sigma = GaussianModel.estimate_sigma_from_peak(self.x, y_smooth, peak_idx)
             sigma = max(sigma, 0.01 * (np.max(self.x) - np.min(self.x)) / max(len(filtered_peaks), 1))
             
+            # Get original Y value for display
             if self.use_log_x:
                 x_linear = 10**self.x[peak_idx]
             else:
                 x_linear = self.x[peak_idx]
             
+            # Find closest index in original data - always in linear space
             idx = np.argmin(np.abs(self.x_sorted - x_linear))
             y_original_value = self.y_sorted[idx]
             
@@ -1199,14 +1145,14 @@ class GaussianDeconvolver:
                 'index': peak_idx,
                 'x': self.x[peak_idx],
                 'x_linear': x_linear,
-                'y': self.y[peak_idx],
-                'y_original': y_original_value,
+                'y': self.y[peak_idx],  # This is in transformed scale (log if use_log_y)
+                'y_original': y_original_value,  # This is in original scale
                 'amp_est': amp,
                 'cen_est': cen,
                 'sigma_est': sigma,
                 'dy': dy[peak_idx],
                 'd2y': d2y[peak_idx],
-                'source': 'auto'
+                'source': 'auto'  # Mark source as auto-detected
             })
             
             initial_params.extend([amp, cen, sigma])
@@ -1215,21 +1161,28 @@ class GaussianDeconvolver:
     
     def add_manual_peak(self, x_position_linear, amplitude=None, sigma_est=None):
         """Add a peak manually at specified linear X position"""
+        # Convert to log space if needed
         if self.use_log_x:
             x_position = np.log10(x_position_linear)
         else:
             x_position = x_position_linear
         
+        # Find index for amplitude estimation
         idx = np.argmin(np.abs(self.x_sorted - x_position_linear))
         
+        # Estimate amplitude if not provided
         if amplitude is None:
+            # Get normalized amplitude at this position
             if self.use_log_x:
+                # Find closest index in log space
                 log_idx = np.argmin(np.abs(self.x - x_position))
                 amplitude = self.y_norm[log_idx] if log_idx < len(self.y_norm) else 0.1
             else:
                 amplitude = self.y_norm[idx] if idx < len(self.y_norm) else 0.1
         
+        # Estimate sigma if not provided
         if sigma_est is None:
+            # Estimate based on distance to nearest minimum
             if self.use_log_x:
                 x_search = self.x
                 y_search = self.y_norm
@@ -1237,6 +1190,7 @@ class GaussianDeconvolver:
                 x_search = self.x_linear
                 y_search = self.y_original / self.y_max
             
+            # Find nearest minima to left and right
             left_idx = idx
             right_idx = idx
             for i in range(idx - 1, 0, -1):
@@ -1248,9 +1202,11 @@ class GaussianDeconvolver:
                     right_idx = i
                     break
             
+            # Estimate sigma
             width = (x_search[right_idx] - x_search[left_idx]) if right_idx > left_idx else 0.1
             sigma_est = max(width / 3.0, 0.01 * (np.max(x_search) - np.min(x_search)) / 20)
         
+        # Add peak info
         peak_info_entry = {
             'index': idx,
             'x': x_position,
@@ -1272,6 +1228,7 @@ class GaussianDeconvolver:
         if not peak_info:
             return [], []
         
+        # Build initial model with current peaks
         n_peaks = len(peak_info)
         if n_peaks == 0:
             return [], []
@@ -1280,12 +1237,16 @@ class GaussianDeconvolver:
         for info in peak_info:
             peak_params.extend([info['amp_est'], info['cen_est'], info['sigma_est']])
         
+        # Calculate initial fit
         y_initial_fit = GaussianModel.multi_gaussian(self.x, *peak_params)
         
+        # Calculate residuals
         residuals = self.y_norm - y_initial_fit
         
+        # Detect peaks in residuals
         height_threshold = sensitivity * np.max(np.abs(residuals))
         
+        # Smooth residuals for better peak detection
         window_length = min(11, len(residuals) // 5 * 2 + 1)
         if window_length % 2 == 0:
             window_length += 1
@@ -1295,16 +1256,20 @@ class GaussianDeconvolver:
         else:
             residuals_smooth = residuals
         
+        # Find positive peaks (where data exceeds fit)
         positive_peaks, _ = find_peaks(residuals_smooth, height=height_threshold, distance=min_distance)
         
+        # Find negative peaks (where fit exceeds data - potential shoulders)
         negative_peaks, _ = find_peaks(-residuals_smooth, height=height_threshold, distance=min_distance)
         
+        # Combine and filter
         all_candidate_indices = sorted(set(positive_peaks) | set(negative_peaks))
         
         missing_peaks = []
         missing_params = []
         
         for idx in all_candidate_indices:
+            # Skip if too close to existing peaks
             too_close = False
             for info in peak_info:
                 if abs(self.x[idx] - info['cen_est']) < min_distance * np.mean(np.diff(self.x)):
@@ -1315,15 +1280,17 @@ class GaussianDeconvolver:
                 continue
             
             cen = self.x[idx]
-            amp = abs(residuals_smooth[idx])
+            amp = abs(residuals_smooth[idx])  # Use absolute value for amplitude
             sigma = GaussianModel.estimate_sigma_from_peak(self.x, residuals_smooth, idx)
             sigma = max(sigma, 0.01 * (np.max(self.x) - np.min(self.x)) / 20)
             
+            # Get original Y value for display
             if self.use_log_x:
                 x_linear = 10**cen
             else:
                 x_linear = cen
             
+            # Find closest index in original data
             orig_idx = np.argmin(np.abs(self.x_sorted - x_linear))
             y_original_value = self.y_sorted[orig_idx]
             
@@ -1354,6 +1321,7 @@ class GaussianDeconvolver:
         if len(initial_params) == 0:
             return False
         
+        # Create fitter with selected parameters
         self.fitter = GaussianFitter(
             method=method, 
             max_nfev=maxfev,
@@ -1362,6 +1330,7 @@ class GaussianDeconvolver:
             last_popt=last_popt
         )
         
+        # Perform fit
         success, popt, components, baseline_params = self.fitter.fit(
             self.x, self.y_norm, initial_params, self.y_max,
             progress_callback=progress_callback
@@ -1372,6 +1341,7 @@ class GaussianDeconvolver:
             self.components = components
             self.baseline_params = baseline_params
             
+            # Reconstruct full fit with baseline
             n_peaks = len(components)
             peak_params = []
             for c in components:
@@ -1381,8 +1351,10 @@ class GaussianDeconvolver:
                 self.x, n_peaks, peak_params, baseline_params or [], self.baseline_method
             )
             
+            # Calculate total area (excluding baseline)
             self.total_area = sum([c['area'] for c in self.components])
             
+            # Quality metrics
             self.quality_metrics = FitQualityAnalyzer.calculate_metrics(
                 self.y_norm, self.fit_y_norm, len(popt)
             )
@@ -1399,10 +1371,12 @@ class GaussianDeconvolver:
         if len(initial_params) == 0:
             return None
         
+        # Create temporary fitter
         fitter = GaussianFitter(
             baseline_method=self.baseline_method
         )
         
+        # Preview fit
         n_baseline = fitter.get_n_baseline_params()
         baseline_params = [0] * n_baseline if n_baseline > 0 else None
         
@@ -1417,6 +1391,7 @@ class GaussianDeconvolver:
         if peak_id > len(self.components):
             return False
         
+        # Store the operation
         st.session_state.app_state.pending_remove = peak_id
         return True
     
@@ -1425,11 +1400,13 @@ class GaussianDeconvolver:
         if peak_id > len(self.components):
             return False
         
+        # Store the operation
         st.session_state.app_state.pending_split = (peak_id, split_position)
         return True
     
     def apply_pending_operations(self, fit_quality='balanced', progress_callback=None):
         """Apply all pending operations and perform fit"""
+        # Get current parameters
         if self.components:
             current_params = []
             for c in self.components:
@@ -1437,6 +1414,7 @@ class GaussianDeconvolver:
         else:
             return False
         
+        # Apply pending remove
         if st.session_state.app_state.pending_remove is not None:
             remove_id = st.session_state.app_state.pending_remove
             new_params = []
@@ -1446,6 +1424,7 @@ class GaussianDeconvolver:
             current_params = new_params
             st.session_state.app_state.pending_remove = None
         
+        # Apply pending split
         if st.session_state.app_state.pending_split is not None:
             peak_id, split_position = st.session_state.app_state.pending_split
             peak = self.components[peak_id - 1]
@@ -1473,6 +1452,7 @@ class GaussianDeconvolver:
             current_params = new_params
             st.session_state.app_state.pending_split = None
         
+        # Perform fit
         return self.fit(
             initial_params=current_params,
             method=st.session_state.app_state.fitting_method,
@@ -1491,6 +1471,7 @@ class GaussianDeconvolver:
                    [{'type': 'bar'}, {'type': 'table'}]]
         )
         
+        # Scientific styling for Plotly
         plotly_template = {
             'layout': {
                 'font': {'family': 'serif', 'size': 12},
@@ -1533,6 +1514,7 @@ class GaussianDeconvolver:
             }
         }
         
+        # Main plot
         fig.add_trace(
             go.Scatter(x=self.x, y=self.y_norm,
                       mode='markers+lines',
@@ -1550,6 +1532,7 @@ class GaussianDeconvolver:
             row=1, col=1
         )
         
+        # Components
         colors = plt.cm.Set3(np.linspace(0, 1, len(self.components)))
         for c, color in zip(self.components, colors):
             rgb_color = f'rgb({int(color[0]*255)}, {int(color[1]*255)}, {int(color[2]*255)})'
@@ -1565,6 +1548,7 @@ class GaussianDeconvolver:
                 row=1, col=1
             )
         
+        # Residuals
         if 'Residuals' in self.quality_metrics:
             residuals = self.quality_metrics['Residuals']
             fig.add_trace(
@@ -1578,6 +1562,7 @@ class GaussianDeconvolver:
             fig.add_hline(y=0, line_dash="dash", line_color="red", 
                          line_width=1, row=1, col=2)
         
+        # Bar chart of components
         centers = [f"Peak {c['id']}" for c in self.components]
         fractions = [c['fraction_percent'] for c in self.components]
         
@@ -1591,6 +1576,7 @@ class GaussianDeconvolver:
             row=2, col=1
         )
         
+        # Metrics table
         metrics = self.quality_metrics
         metrics_table = go.Table(
             header=dict(
@@ -1617,6 +1603,7 @@ class GaussianDeconvolver:
         )
         fig.add_trace(metrics_table, row=2, col=2)
         
+        # Update layout with scientific styling
         fig.update_layout(
             height=700,
             showlegend=True,
@@ -1630,6 +1617,7 @@ class GaussianDeconvolver:
             )
         )
         
+        # Update axes
         fig.update_xaxes(
             title_text=self.x_label,
             title_font=dict(family='serif', size=13, weight='bold'),
@@ -1716,61 +1704,6 @@ class GaussianDeconvolver:
         )
         
         return fig
-
-
-def plot_baseline_quality(x, y, baseline, corrected_y):
-    """Detailed visualization of baseline correction quality"""
-    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
-    
-    ax1 = axes[0, 0]
-    ax1.plot(x, y, 'b-', label='Original', alpha=0.7, linewidth=1)
-    ax1.plot(x, baseline, 'r-', label='Baseline', linewidth=2)
-    ax1.fill_between(x, baseline, y, where=(y > baseline), 
-                     color='green', alpha=0.2, label='Peaks')
-    ax1.fill_between(x, baseline, y, where=(y < baseline), 
-                     color='red', alpha=0.2, label='Below baseline')
-    ax1.set_title('Original Data with Baseline')
-    ax1.set_xlabel('X')
-    ax1.set_ylabel('Intensity')
-    ax1.legend(loc='upper right')
-    ax1.grid(True, alpha=0.3)
-    
-    ax2 = axes[0, 1]
-    ax2.plot(x, corrected_y, 'g-', label='Corrected', linewidth=1.5)
-    ax2.axhline(y=0, color='k', linestyle='-', alpha=0.3)
-    ax2.fill_between(x, 0, corrected_y, where=(corrected_y > 0), 
-                     color='green', alpha=0.2)
-    ax2.fill_between(x, 0, corrected_y, where=(corrected_y < 0), 
-                     color='red', alpha=0.2)
-    ax2.set_title('Baseline-Corrected Data')
-    ax2.set_xlabel('X')
-    ax2.set_ylabel('Intensity')
-    ax2.legend(loc='upper right')
-    ax2.grid(True, alpha=0.3)
-    
-    ax3 = axes[1, 0]
-    residuals = y - baseline
-    ax3.hist(residuals, bins=50, edgecolor='black', alpha=0.7, color='blue')
-    ax3.axvline(x=0, color='r', linestyle='--', linewidth=2)
-    ax3.axvline(x=np.mean(residuals), color='g', linestyle='--', linewidth=2, 
-                label=f'Mean: {np.mean(residuals):.2e}')
-    ax3.set_title('Residuals Distribution')
-    ax3.set_xlabel('Residual Value')
-    ax3.set_ylabel('Frequency')
-    ax3.legend()
-    ax3.grid(True, alpha=0.3)
-    
-    ax4 = axes[1, 1]
-    ax4.plot(x, y, 'b-', alpha=0.5, label='Original', linewidth=1)
-    ax4.plot(x, corrected_y, 'g-', alpha=0.8, label='Corrected', linewidth=1.5)
-    ax4.set_title('Before vs After Correction')
-    ax4.set_xlabel('X')
-    ax4.set_ylabel('Intensity')
-    ax4.legend(loc='upper right')
-    ax4.grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    return fig
 
 
 # ==================== DEFAULT DATA ====================
@@ -1872,10 +1805,10 @@ DEFAULT_DATA = """
 with st.sidebar:
     st.header("📋 Navigation")
     
+    # Step indicator
     steps = {
         1: "1. Data Loading",
         2: "2. Scale Settings",
-        2.5: "2.5 Baseline Correction",
         3: "3. Peak Detection",
         4: "4. Editing",
         5: "5. Results"
@@ -1891,6 +1824,7 @@ with st.sidebar:
     
     st.markdown("---")
     
+    # Advanced settings (collapsible)
     with st.expander("⚙️ Advanced Settings", expanded=False):
         st.session_state.app_state.clip_negative = st.checkbox(
             "Clip negative values to 0", 
@@ -1932,12 +1866,20 @@ with st.sidebar:
             step=1000
         )
         
+        st.session_state.app_state.baseline_method = st.selectbox(
+            "Baseline correction",
+            options=['none', 'constant', 'linear', 'quadratic'],
+            index=0,
+            help="Remove background before fitting"
+        )
+        
         st.session_state.app_state.preview_mode = st.checkbox(
             "Preview mode (no fitting)",
             value=st.session_state.app_state.preview_mode,
             help="Show estimated peaks without performing optimization"
         )
     
+    # Reset button
     if st.button("🔄 Start Over", use_container_width=True):
         st.session_state.app_state = AppState()
         st.rerun()
@@ -1951,6 +1893,7 @@ if st.session_state.app_state.current_step == 1:
     col1, col2 = st.columns([2, 1])
     
     with col1:
+        # Text area for data input
         data_text = st.text_area(
             "Paste your data (x y separated by space, comma, or tab):",
             height=300,
@@ -1974,8 +1917,6 @@ if st.session_state.app_state.current_step == 1:
             if len(x) > 0:
                 st.session_state.app_state.raw_x = x
                 st.session_state.app_state.raw_y = y
-                st.session_state.app_state.original_x = x.copy()
-                st.session_state.app_state.original_y = y.copy()
                 st.session_state.app_state.x_range_min = float(np.min(x))
                 st.session_state.app_state.x_range_max = float(np.max(x))
                 st.session_state.app_state.current_step = 2
@@ -1983,6 +1924,7 @@ if st.session_state.app_state.current_step == 1:
             else:
                 st.error("Could not parse data. Check the format.")
     
+    # Preview
     if st.session_state.app_state.raw_x is not None:
         st.subheader("Data Preview:")
         
@@ -2015,6 +1957,7 @@ elif st.session_state.app_state.current_step == 2:
     with col1:
         st.subheader("Scale Parameters")
         
+        # Auto-detection
         if st.button("🔍 Auto-detect Scales", use_container_width=True):
             suggest_log_x, suggest_log_y = DataParser.auto_detect_scale(
                 st.session_state.app_state.raw_x, 
@@ -2024,6 +1967,7 @@ elif st.session_state.app_state.current_step == 2:
             st.session_state.app_state.use_log_y = suggest_log_y
             st.rerun()
         
+        # Manual settings
         st.session_state.app_state.use_log_x = st.checkbox(
             "Logarithmic X scale", 
             value=st.session_state.app_state.use_log_x
@@ -2036,13 +1980,16 @@ elif st.session_state.app_state.current_step == 2:
         st.markdown("---")
         st.subheader("Range Selection")
         
+        # Get data points count
         n_points = len(st.session_state.app_state.raw_x)
         
+        # Initialize point range if not set
         if st.session_state.app_state.point_range_start is None:
             st.session_state.app_state.point_range_start = 0
         if st.session_state.app_state.point_range_end is None:
             st.session_state.app_state.point_range_end = n_points - 1
         
+        # Create slider by point indices (1-based for user-friendly display)
         point_range = st.slider(
             "Select point range:",
             min_value=1,
@@ -2053,16 +2000,20 @@ elif st.session_state.app_state.current_step == 2:
             help="Select range by point index (1-based). This ensures continuous block of points regardless of scale."
         )
         
+        # Store selected indices (convert to 0-based)
         start_idx = point_range[0] - 1
         end_idx = point_range[1] - 1
         st.session_state.app_state.point_range_start = start_idx
         st.session_state.app_state.point_range_end = end_idx
         
+        # Get X values for display
         x_selected = st.session_state.app_state.raw_x[start_idx:end_idx+1]
         range_min_linear = float(np.min(x_selected))
         range_max_linear = float(np.max(x_selected))
         
+        # Display X range information
         if st.session_state.app_state.use_log_x:
+            # For log scale, show both linear and log values
             log_min = np.log10(max(range_min_linear, 1e-12))
             log_max = np.log10(range_max_linear)
             st.info(f"X range: {range_min_linear:.3e} - {range_max_linear:.3e} (linear)\n"
@@ -2070,9 +2021,11 @@ elif st.session_state.app_state.current_step == 2:
         else:
             st.info(f"X range: {range_min_linear:.3e} - {range_max_linear:.3e}")
         
+        # Show selected range statistics
         points_in_range = end_idx - start_idx + 1
         st.info(f"Points in selected range: {points_in_range} / {n_points} (indices {start_idx+1}-{end_idx+1})")
         
+        # Store the X range values for compatibility with downstream code
         st.session_state.app_state.x_range_min = range_min_linear
         st.session_state.app_state.x_range_max = range_max_linear
         
@@ -2085,6 +2038,7 @@ elif st.session_state.app_state.current_step == 2:
                 st.rerun()
         with col_b:
             if st.button("✅ Apply & Continue", type="primary", use_container_width=True):
+                # Apply range selection to data using point indices
                 x_range, y_range = DataParser.apply_range_selection(
                     st.session_state.app_state.raw_x,
                     st.session_state.app_state.raw_y,
@@ -2093,10 +2047,11 @@ elif st.session_state.app_state.current_step == 2:
                     st.session_state.app_state.use_log_x
                 )
                 
+                # Update raw data with selected range
                 st.session_state.app_state.raw_x = x_range
                 st.session_state.app_state.raw_y = y_range
                 
-                st.session_state.app_state.current_step = 2.5
+                st.session_state.app_state.current_step = 3
                 st.rerun()
     
     with col2:
@@ -2105,6 +2060,7 @@ elif st.session_state.app_state.current_step == 2:
         plotter = SpectrumPlotter()
         fig, ax = plt.subplots(figsize=(8, 5))
         
+        # Apply range selection to preview using indices
         if 'start_idx' in locals() and 'end_idx' in locals():
             x_preview, y_preview = DataParser.apply_range_selection(
                 st.session_state.app_state.raw_x,
@@ -2114,6 +2070,7 @@ elif st.session_state.app_state.current_step == 2:
                 st.session_state.app_state.use_log_x
             )
         else:
+            # Use stored indices if available
             if st.session_state.app_state.point_range_start is not None:
                 x_preview, y_preview = DataParser.apply_range_selection(
                     st.session_state.app_state.raw_x,
@@ -2133,7 +2090,9 @@ elif st.session_state.app_state.current_step == 2:
             ax=ax
         )
 
+        # Highlight selected range on full data plot
         if len(x_preview) < len(st.session_state.app_state.raw_x):
+            # Get the X range of selected points
             if len(x_preview) > 0:
                 x_min_selected = np.min(x_preview)
                 x_max_selected = np.max(x_preview)
@@ -2144,313 +2103,16 @@ elif st.session_state.app_state.current_step == 2:
         plt.close()
 
 
-# ==================== STEP 2.5: BASELINE CORRECTION ====================
-
-elif st.session_state.app_state.current_step == 2.5:
-    st.header("Step 2.5: Baseline Correction")
-    st.info("""
-    🔬 **Advanced Baseline Correction**
-    
-    This step applies sophisticated baseline correction algorithms to remove background 
-    before peak detection. Choose from multiple methods optimized for different types of spectra.
-    """)
-    
-    x = st.session_state.app_state.raw_x
-    y = st.session_state.app_state.raw_y
-    
-    col1, col2 = st.columns([1, 2])
-    
-    with col1:
-        st.subheader("Correction Settings")
-        
-        baseline_method_options = [
-            ('none', '❌ No correction'),
-            ('asls', '📊 AsLS (Asymmetric LS)'),
-            ('airpls', '📊 airPLS (Adaptive IRLS)'),
-            ('arpls', '📊 arPLS (Asymmetric Reweighted PLS)'),
-            ('drpls', '📊 drPLS (Doubly Reweighted PLS)'),
-            ('iarpls', '📊 IarPLS (Improved arPLS)'),
-            ('psalsa', '📊 PSALSA (Peaked Signal AsLS)'),
-            ('derpsalsa', '📊 DerPSALSA (Derivative PSALSA)'),
-            ('mor', '🔷 MOR (Morphological)'),
-            ('imor', '🔷 IMOR (Improved MOR)'),
-            ('rolling_ball', '⚪ Rolling Ball'),
-            ('rubberband', '🎯 Rubberband (Convex Hull)'),
-            ('dietrich', '🎯 Dietrich (Classification)'),
-            ('golotvin', '🎯 Golotvin (Classification)'),
-            ('pspline_asls', '📈 P-Spline AsLS'),
-            ('snip', '⚡ SNIP (Fast Iterative)'),
-        ]
-        
-        selected_method = st.selectbox(
-            "Method",
-            options=baseline_method_options,
-            format_func=lambda x: x[1],
-            index=0
-        )
-        
-        method_key = selected_method[0]
-        
-        st.markdown("---")
-        st.subheader("Method Parameters")
-        
-        if method_key in ['asls', 'airpls', 'arpls', 'drpls', 'iarpls', 'psalsa', 'derpsalsa', 'pspline_asls']:
-            lam = st.number_input(
-                "Smoothing (λ)",
-                min_value=1e0,
-                max_value=1e9,
-                value=float(st.session_state.app_state.baseline_lam),
-                step=1e4,
-                format="%.0e",
-                help="Higher values = smoother baseline"
-            )
-            st.session_state.app_state.baseline_lam = lam
-            
-            if method_key in ['asls', 'psalsa', 'derpsalsa', 'pspline_asls']:
-                p = st.slider(
-                    "Asymmetry (p)",
-                    min_value=0.0,
-                    max_value=0.5,
-                    value=float(st.session_state.app_state.baseline_p),
-                    step=0.001,
-                    help="Lower values = less weight to peaks (0.001-0.01 recommended)"
-                )
-                st.session_state.app_state.baseline_p = p
-        
-        elif method_key in ['mor', 'imor', 'rolling_ball', 'snip', 'golotvin']:
-            half_window = st.slider(
-                "Window size",
-                min_value=1,
-                max_value=min(200, len(x) // 4),
-                value=min(st.session_state.app_state.baseline_half_window, len(x) // 4),
-                help="Larger windows = smoother baseline, but may distort narrow peaks"
-            )
-            st.session_state.app_state.baseline_half_window = half_window
-        
-        elif method_key in ['dietrich']:
-            poly_order = st.slider(
-                "Polynomial order",
-                min_value=1,
-                max_value=10,
-                value=st.session_state.app_state.baseline_poly_order,
-                help="Higher order = more flexible baseline"
-            )
-            st.session_state.app_state.baseline_poly_order = poly_order
-            
-            num_std = st.slider(
-                "Number of std deviations",
-                min_value=1.0,
-                max_value=5.0,
-                value=float(st.session_state.app_state.baseline_num_std),
-                step=0.1,
-                help="Threshold for detecting baseline points"
-            )
-            st.session_state.app_state.baseline_num_std = num_std
-        
-        elif method_key == 'rubberband':
-            lam = st.number_input(
-                "Smoothing (λ)",
-                min_value=1e0,
-                max_value=1e9,
-                value=float(st.session_state.app_state.baseline_lam),
-                step=1e4,
-                format="%.0e",
-                help="Higher values = smoother baseline"
-            )
-            st.session_state.app_state.baseline_lam = lam
-        
-        st.markdown("---")
-        col_preview, col_apply = st.columns(2)
-        
-        with col_preview:
-            if st.button("🔄 Preview", type="secondary", use_container_width=True):
-                st.session_state.app_state.preview_baseline = True
-                st.rerun()
-        
-        with col_apply:
-            if st.button("✅ Apply Correction", type="primary", use_container_width=True):
-                with st.spinner("Applying baseline correction..."):
-                    params = {}
-                    if method_key in ['asls', 'airpls', 'arpls', 'drpls', 'iarpls', 'psalsa', 'derpsalsa', 'pspline_asls']:
-                        params['lam'] = st.session_state.app_state.baseline_lam
-                        if method_key in ['asls', 'psalsa', 'derpsalsa', 'pspline_asls']:
-                            params['p'] = st.session_state.app_state.baseline_p
-                    elif method_key in ['mor', 'imor', 'rolling_ball', 'snip', 'golotvin']:
-                        params['half_window'] = st.session_state.app_state.baseline_half_window
-                    elif method_key == 'dietrich':
-                        params['poly_order'] = st.session_state.app_state.baseline_poly_order
-                        params['num_std'] = st.session_state.app_state.baseline_num_std
-                    elif method_key == 'rubberband':
-                        params['lam'] = st.session_state.app_state.baseline_lam
-                    
-                    if method_key == 'none':
-                        corrector = BaselineCorrector('none')
-                    else:
-                        corrector = BaselineCorrector(method_key, **params)
-                    
-                    if len(x) == len(st.session_state.app_state.original_x) and st.session_state.app_state.point_range_start is not None:
-                        x_sorted, y_sorted = DataParser.apply_range_selection(
-                            x, y,
-                            st.session_state.app_state.point_range_start,
-                            st.session_state.app_state.point_range_end
-                        )
-                    else:
-                        x_sorted, y_sorted = x, y
-                    
-                    y_corrected, baseline, info = corrector.correct(x_sorted, y_sorted)
-                    
-                    st.session_state.app_state.baseline_corrector = corrector
-                    st.session_state.app_state.baseline_corrected_y = y_corrected
-                    st.session_state.app_state.baseline_curve = baseline
-                    st.session_state.app_state.baseline_method = method_key
-                    st.session_state.app_state.baseline_params = params
-                    
-                    st.session_state.app_state.raw_y = y_corrected
-                    st.session_state.app_state.raw_x = x_sorted
-                    
-                    # Обновляем исходные данные для корректного отображения
-                    if hasattr(st.session_state.app_state, 'original_x'):
-                        st.session_state.app_state.original_x = x_sorted.copy()
-                    if hasattr(st.session_state.app_state, 'original_y'):
-                        st.session_state.app_state.original_y = y_corrected.copy()
-                    
-                    st.success(f"Baseline correction applied using {method_key}")
-                    st.session_state.app_state.preview_baseline = True
-                    st.rerun()
-    
-    with col2:
-        st.subheader("Visual Preview")
-        
-        if st.session_state.app_state.preview_baseline:
-            x_range = st.session_state.app_state.raw_x
-            y_range = st.session_state.app_state.raw_y
-            # Убеждаемся что baseline и corrected имеют ту же длину
-            if hasattr(st.session_state.app_state, 'baseline_curve') and st.session_state.app_state.baseline_curve is not None:
-                if len(st.session_state.app_state.baseline_curve) != len(x_range):
-                    # Пересчитываем baseline для текущего x_range
-                    if st.session_state.app_state.baseline_corrector is not None:
-                        temp_corrected, temp_baseline, temp_info = st.session_state.app_state.baseline_corrector.correct(x_range, y_range)
-                        st.session_state.app_state.baseline_curve = temp_baseline
-                        st.session_state.app_state.baseline_corrected_y = temp_corrected
-            
-            if hasattr(st.session_state.app_state, 'baseline_curve') and st.session_state.app_state.baseline_curve is not None:
-                baseline = st.session_state.app_state.baseline_curve
-                y_corrected = st.session_state.app_state.baseline_corrected_y
-                
-                fig, axes = plt.subplots(3, 1, figsize=(10, 12))
-                
-                # Применяем логарифмические шкалы если они выбраны
-                if st.session_state.app_state.use_log_x:
-                    axes[0].set_xscale('log')
-                    axes[1].set_xscale('log')
-                    axes[2].set_xscale('log')
-                if st.session_state.app_state.use_log_y:
-                    axes[0].set_yscale('log')
-                    axes[1].set_yscale('log')
-                    axes[2].set_yscale('log')
-                
-                ax1 = axes[0]
-                ax1.plot(x_range, y_range, 'b-', label='Original data', alpha=0.7, linewidth=1)
-                ax1.plot(x_range, baseline, 'r-', label='Baseline', linewidth=2)
-                ax1.fill_between(x_range, baseline, y_range, 
-                                where=(y_range > baseline), color='green', alpha=0.2,
-                                label='Above baseline (peaks)')
-                ax1.fill_between(x_range, baseline, y_range, 
-                                where=(y_range < baseline), color='red', alpha=0.2,
-                                label='Below baseline')
-                ax1.set_title('Original Data with Baseline')
-                x_label = 'X' + (' (log scale)' if st.session_state.app_state.use_log_x else '')
-                y_label = 'Intensity' + (' (log scale)' if st.session_state.app_state.use_log_y else '')
-                ax1.set_xlabel(x_label)
-                ax1.set_ylabel(y_label)
-                ax1.legend(loc='upper right')
-                ax1.grid(True, alpha=0.3)
-                
-                ax2 = axes[1]
-                ax2.plot(x_range, y_corrected, 'g-', label='Corrected', linewidth=1.5)
-                ax2.axhline(y=0, color='k', linestyle='-', alpha=0.3, linewidth=0.5)
-                ax2.fill_between(x_range, 0, y_corrected, 
-                                where=(y_corrected > 0), color='green', alpha=0.2)
-                ax2.fill_between(x_range, 0, y_corrected, 
-                                where=(y_corrected < 0), color='red', alpha=0.2)
-                ax2.set_title('Baseline-Corrected Data')
-                ax2.set_xlabel(x_label)
-                ax2.set_ylabel(y_label)
-                ax2.legend(loc='upper right')
-                ax2.grid(True, alpha=0.3)
-                
-                ax3 = axes[2]
-                residuals = y_range - baseline
-                ax3.plot(x_range, residuals, 'b-', label='Residuals', alpha=0.7)
-                ax3.axhline(y=0, color='r', linestyle='--', alpha=0.5)
-                ax3.set_title('Residuals (Data - Baseline)')
-                ax3.set_xlabel(x_label)
-                ax3.set_ylabel('Residual')
-                ax3.legend(loc='upper right')
-                ax3.grid(True, alpha=0.3)
-                
-                plt.tight_layout()
-                st.pyplot(fig)
-                plt.close()
-                
-                if hasattr(st.session_state.app_state.baseline_corrector, 'get_quality_metrics'):
-                    metrics = BaselineCorrector.get_quality_metrics(y_range, baseline)
-                    
-                    st.subheader("Quality Metrics")
-                    col_m1, col_m2, col_m3, col_m4 = st.columns(4)
-                    with col_m1:
-                        st.metric("RMSE", f"{metrics.get('rmse', 0):.3e}")
-                    with col_m2:
-                        st.metric("MAE", f"{metrics.get('mae', 0):.3e}")
-                    with col_m3:
-                        st.metric("Max Residual", f"{metrics.get('max_residual', 0):.3e}")
-                    with col_m4:
-                        st.metric("Negative %", f"{metrics.get('negative_fraction', 0):.1f}%")
-            else:
-                st.info("Apply baseline correction to see preview")
-        else:
-            st.info("""
-            👆 Select a correction method and click **Preview** to see the effect.
-            
-            **Tips:**
-            - Start with **'Rolling Ball'** or **'MOR'** for most spectra
-            - Use **'airPLS'** or **'arPLS'** for complex baselines
-            - **'SNIP'** is very fast and works well for noisy data
-            - Adjust parameters and preview until satisfied
-            """)
-    
-    st.markdown("---")
-    col_back, col_skip, col_next = st.columns([1, 1, 1])
-    
-    with col_back:
-        if st.button("⬅️ Back", use_container_width=True):
-            st.session_state.app_state.current_step = 2
-            st.rerun()
-    
-    with col_skip:
-        if st.button("⏭️ Skip & Continue", use_container_width=True):
-            if hasattr(st.session_state.app_state, 'baseline_corrector'):
-                if hasattr(st.session_state.app_state, 'original_y'):
-                    st.session_state.app_state.raw_y = st.session_state.app_state.original_y.copy()
-            st.session_state.app_state.current_step = 3
-            st.rerun()
-    
-    with col_next:
-        if st.button("✅ Continue to Peak Detection", type="primary", use_container_width=True):
-            st.session_state.app_state.current_step = 3
-            st.rerun()
-
-
 # ==================== STEP 3: PEAK DETECTION ====================
 
 elif st.session_state.app_state.current_step == 3:
     st.header("Step 3: Peak Detection")
     
+    # Create deconvolver if not yet created
     if st.session_state.app_state.deconvolver is None:
+        # Store original data separately
         st.session_state.app_state.original_x = st.session_state.app_state.raw_x.copy()
         st.session_state.app_state.original_y = st.session_state.app_state.raw_y.copy()
-        
-        baseline_params = st.session_state.app_state.baseline_params if st.session_state.app_state.baseline_method != 'none' else None
         
         st.session_state.app_state.deconvolver = GaussianDeconvolver(
             st.session_state.app_state.raw_x,
@@ -2460,10 +2122,10 @@ elif st.session_state.app_state.current_step == 3:
             clip_negative=st.session_state.app_state.clip_negative,
             show_warnings=st.session_state.app_state.show_warnings,
             baseline_method=st.session_state.app_state.baseline_method,
-            smoothing_level=st.session_state.app_state.smoothing_level,
-            baseline_params=baseline_params
+            smoothing_level=st.session_state.app_state.smoothing_level
         )
         
+        # Show warnings if any
         if st.session_state.app_state.deconvolver.clipped_points > 0:
             st.warning(f"Clipped {st.session_state.app_state.deconvolver.clipped_points} negative values to 0")
         if st.session_state.app_state.deconvolver.small_values_warning:
@@ -2491,13 +2153,14 @@ elif st.session_state.app_state.current_step == 3:
             step=1
         )
         
+        # Show smoothing preview option if smoothing is enabled
         if st.session_state.app_state.smoothing_level != 'none':
             st.info(f"Smoothing: {st.session_state.app_state.smoothing_level}")
         
         col_a, col_b = st.columns(2)
         with col_a:
             if st.button("⬅️ Back", use_container_width=True):
-                st.session_state.app_state.current_step = 2.5
+                st.session_state.app_state.current_step = 2
                 st.rerun()
         with col_b:
             if st.button("🔍 Find Peaks", type="primary", use_container_width=True):
@@ -2509,6 +2172,7 @@ elif st.session_state.app_state.current_step == 3:
                 st.session_state.app_state.peak_info = peak_info
                 st.session_state.app_state.derivatives = derivatives
                 st.session_state.app_state.initial_params = initial_params
+                # Clear manual and residuals peaks
                 st.session_state.app_state.manual_peaks = []
                 st.session_state.app_state.residuals_peaks = []
                 st.success(f"Found {len(peak_info)} peaks!")
@@ -2517,6 +2181,7 @@ elif st.session_state.app_state.current_step == 3:
             st.markdown("---")
             st.subheader("Manual Peak Addition")
             
+            # Get current X range for slider
             deconv = st.session_state.app_state.deconvolver
             if deconv.use_log_x:
                 x_min_display = 10 ** np.min(deconv.x)
@@ -2529,9 +2194,11 @@ elif st.session_state.app_state.current_step == 3:
                 slider_min = x_min_display
                 slider_max = x_max_display
             
+            # Calculate number of steps: min(200, n_points)
             n_points = len(deconv.x_linear)
             n_steps = min(200, n_points)
             
+            # Create slider in appropriate scale
             if deconv.use_log_x:
                 current_position_log = st.slider(
                     "Select peak position (log scale):",
@@ -2556,12 +2223,15 @@ elif st.session_state.app_state.current_step == 3:
                 )
                 st.write(f"Position: {manual_position_linear:.3e}")
             
+            # Store current manual position for visualization
             st.session_state.app_state.manual_peak_position = manual_position_linear
             
             col_add1, col_add2 = st.columns(2)
             with col_add1:
                 if st.button("➕ Add peak at this position", use_container_width=True):
+                    # Add manual peak
                     new_peak, new_params = deconv.add_manual_peak(manual_position_linear)
+                    # Add to peak_info
                     if st.session_state.app_state.peak_info is None:
                         st.session_state.app_state.peak_info = []
                     st.session_state.app_state.peak_info.append(new_peak)
@@ -2580,6 +2250,7 @@ elif st.session_state.app_state.current_step == 3:
                         )
                     if missing_peaks:
                         st.session_state.app_state.residuals_peaks = missing_peaks
+                        # Display found peaks with checkboxes for selection
                         st.subheader("Suggested peaks from residuals:")
                         selected_to_add = []
                         for i, p in enumerate(missing_peaks):
@@ -2605,9 +2276,11 @@ elif st.session_state.app_state.current_step == 3:
             if st.button("✅ Confirm Peaks", use_container_width=True):
                 with st.spinner("Preparing preview..."):
                     if st.session_state.app_state.preview_mode:
+                        # Just store params for later
                         st.session_state.app_state.current_step = 4
                         st.rerun()
                     else:
+                        # Create progress bar
                         progress_bar = st.progress(0)
                         status_text = st.empty()
                         
@@ -2627,6 +2300,7 @@ elif st.session_state.app_state.current_step == 3:
                         status_text.empty()
                         
                         if success:
+                            # Store last popt for future use
                             st.session_state.app_state.last_popt = st.session_state.app_state.deconvolver.popt
                             st.session_state.app_state.current_step = 4
                             st.rerun()
@@ -2642,9 +2316,11 @@ elif st.session_state.app_state.current_step == 3:
             deconv = st.session_state.app_state.deconvolver
             plotter = SpectrumPlotter()
             
+            # Create tabs for different plots
             tab1, tab2, tab3 = st.tabs(["📊 Peaks", "📈 Derivatives", "📋 Information"])
 
             with tab1:
+                # Get current manual position for visualization
                 manual_pos = getattr(st.session_state.app_state, 'manual_peak_position', None)
                 fig, ax = plt.subplots(figsize=(10, 6))
                 plotter.plot_with_peaks(
@@ -2658,6 +2334,7 @@ elif st.session_state.app_state.current_step == 3:
                 st.pyplot(fig)
                 plt.close()
                 
+                # Add legend explanation
                 st.caption("""
                 **Peak color legend:**
                 - 🟢 Green: Auto-detected peaks
@@ -2668,6 +2345,7 @@ elif st.session_state.app_state.current_step == 3:
             with tab2:
                 fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6))
                 
+                # First derivative
                 ax1.plot(deconv.x, dy, 'b-', linewidth=1.5, label='First derivative')
                 ax1.axhline(y=0, color='r', linestyle='--', alpha=0.5)
                 ax1.set_xlabel(deconv.x_label)
@@ -2676,6 +2354,7 @@ elif st.session_state.app_state.current_step == 3:
                 ax1.grid(True, alpha=0.3)
                 ax1.legend()
                 
+                # Second derivative
                 ax2.plot(deconv.x, d2y, 'g-', linewidth=1.5, label='Second derivative')
                 ax2.axhline(y=0, color='r', linestyle='--', alpha=0.5)
                 ax2.set_xlabel(deconv.x_label)
@@ -2689,49 +2368,23 @@ elif st.session_state.app_state.current_step == 3:
                 plt.close()
             
             with tab3:
+                # Create a table with peak information including source
                 data = []
                 for i, info in enumerate(st.session_state.app_state.peak_info):
                     source = info.get('source', 'auto')
                     source_icon = "🟢" if source == 'auto' else "🟠" if source == 'manual' else "🔵"
                     data.append({
-                        'ID': i + 1,
+                        'Peak': i + 1,
                         'Source': f"{source_icon} {source}",
                         'X Center': f"{info['x_linear']:.4e}",
                         'Y Amplitude': f"{info['y_original']:.4e}",
                         'Estimated Sigma': f"{info['sigma_est']:.4f}",
-                        '🗑️ Delete': False
                     })
                 
                 df = pd.DataFrame(data)
+                st.dataframe(df, use_container_width=True)
                 
-                edited_df = st.data_editor(
-                    df,
-                    column_config={
-                        "🗑️ Delete": st.column_config.CheckboxColumn(
-                            "🗑️ Delete",
-                            help="Check to mark peak for deletion",
-                            default=False,
-                        )
-                    },
-                    use_container_width=True,
-                    hide_index=True,
-                    disabled=["ID", "Source", "X Center", "Y Amplitude", "Estimated Sigma"],
-                )
-                
-                col_del1, col_del2, col_del3 = st.columns([1, 1, 2])
-                with col_del1:
-                    if st.button("🗑️ Apply Deletions", type="primary", use_container_width=True):
-                        peaks_to_delete = [i for i, row in edited_df.iterrows() if row.get("🗑️ Delete", False)]
-                        if peaks_to_delete:
-                            for idx in sorted(peaks_to_delete, reverse=True):
-                                del st.session_state.app_state.peak_info[idx]
-                                if len(st.session_state.app_state.initial_params) >= (idx + 1) * 3:
-                                    del st.session_state.app_state.initial_params[idx*3:(idx+1)*3]
-                            st.success(f"Deleted {len(peaks_to_delete)} peaks")
-                            st.rerun()
-                        else:
-                            st.info("No peaks selected for deletion")
-                
+                # Show peak detection statistics
                 st.markdown("---")
                 st.subheader("Detection Statistics")
                 col1, col2, col3, col4 = st.columns(4)
@@ -2770,23 +2423,29 @@ elif st.session_state.app_state.current_step == 4:
         with col1:
             st.subheader("Peak Management")
             
+            # Show pending operations
             if st.session_state.app_state.pending_remove is not None:
                 st.warning(f"Pending: Remove Peak {st.session_state.app_state.pending_remove}")
             if st.session_state.app_state.pending_split is not None:
                 st.warning(f"Pending: Split Peak {st.session_state.app_state.pending_split[0]}")
             
+            # Display quality metrics if available
             if deconv.quality_metrics:
                 metrics = deconv.quality_metrics
                 st.info(f"R² = {metrics.get('R²', 0):.4f} | RMSE = {metrics.get('RMSE', 0):.2e}")
             
             st.markdown("---")
             
+            # Preview mode indicator
             if st.session_state.app_state.preview_mode:
                 st.info("🔍 PREVIEW MODE - No fitting performed")
             
+            # Peak selection (only if components exist)
             if deconv.components:
+                # Display peak sources in selection dropdown
                 peak_options = {}
                 for c in deconv.components:
+                    # Determine source (simplified - we don't track source per component after fit)
                     source_info = ""
                     if hasattr(st.session_state.app_state, 'peak_info'):
                         for p in st.session_state.app_state.peak_info:
@@ -2805,6 +2464,7 @@ elif st.session_state.app_state.current_step == 4:
                 if selected_peak:
                     peak_id = peak_options[selected_peak]
                     
+                    # Split position slider
                     peak = deconv.components[peak_id - 1]
                     min_x = np.min(deconv.x)
                     max_x = np.max(deconv.x)
@@ -2836,8 +2496,10 @@ elif st.session_state.app_state.current_step == 4:
             
             st.markdown("---")
             
+            # Apply changes button
             if st.button("🔄 Apply Changes and Recalculate", type="primary", use_container_width=True):
                 with st.spinner("Applying changes and recalculating..."):
+                    # Create progress bar
                     progress_bar = st.progress(0)
                     status_text = st.empty()
                     
@@ -2846,6 +2508,7 @@ elif st.session_state.app_state.current_step == 4:
                         status_text.text(message)
                     
                     if st.session_state.app_state.preview_mode:
+                        # In preview mode, just show preview
                         preview_fit = deconv.preview_fit()
                         if preview_fit is not None:
                             st.session_state.app_state.preview_fit = preview_fit
@@ -2854,6 +2517,7 @@ elif st.session_state.app_state.current_step == 4:
                         status_text.empty()
                         st.rerun()
                     else:
+                        # Apply pending operations and fit
                         success = deconv.apply_pending_operations(
                             fit_quality=st.session_state.app_state.fit_quality,
                             progress_callback=update_progress
@@ -2863,12 +2527,14 @@ elif st.session_state.app_state.current_step == 4:
                         status_text.empty()
                         
                         if success:
+                            # Store last popt for future use
                             st.session_state.app_state.last_popt = deconv.popt
                             st.success("Recalculation complete!")
                             st.rerun()
                         else:
                             st.error("Recalculation failed")
             
+            # Reset pending operations
             if st.button("🔄 Clear Pending Operations", use_container_width=True):
                 st.session_state.app_state.pending_remove = None
                 st.session_state.app_state.pending_split = None
@@ -2890,6 +2556,7 @@ elif st.session_state.app_state.current_step == 4:
             st.subheader("Current Deconvolution")
             
             if st.session_state.app_state.preview_mode and hasattr(st.session_state.app_state, 'preview_fit'):
+                # Show preview
                 fig, ax = plt.subplots(figsize=(10, 6))
                 plotter.plot_deconvolution_result(
                     deconv,
@@ -2903,6 +2570,7 @@ elif st.session_state.app_state.current_step == 4:
                 st.pyplot(fig)
                 plt.close()
             elif deconv.components:
+                # Show actual fit
                 fig, ax = plt.subplots(figsize=(10, 6))
                 plotter.plot_deconvolution_result(
                     deconv,
@@ -2925,6 +2593,7 @@ elif st.session_state.app_state.current_step == 5:
     if st.session_state.app_state.deconvolver and st.session_state.app_state.deconvolver.components:
         deconv = st.session_state.app_state.deconvolver
         
+        # Back button at the top
         col_back, _ = st.columns([1, 5])
         with col_back:
             if st.button("⬅️ Back to Editing", use_container_width=True):
@@ -2933,7 +2602,8 @@ elif st.session_state.app_state.current_step == 5:
         
         st.markdown("---")
         
-        tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Graphs", "📈 Normalized View", "📋 Table", "📥 Export", "📐 Baseline"])
+        # Create tabs for results
+        tab1, tab2, tab3, tab4 = st.tabs(["📊 Graphs", "📈 Normalized View", "📋 Table", "📥 Export"])
         
         with tab1:
             col1, col2 = st.columns(2)
@@ -2958,8 +2628,10 @@ elif st.session_state.app_state.current_step == 5:
             with col2:
                 st.subheader("Area Distribution Analysis")
                 
+                # Create a figure with two subplots
                 fig = plt.figure(figsize=(12, 10))
                 
+                # 1. Bar chart of areas (top left)
                 ax1 = plt.subplot(2, 2, 1)
                 peaks = [f'Peak {c["id"]}' for c in deconv.components]
                 areas = [c['area'] for c in deconv.components]
@@ -2973,12 +2645,14 @@ elif st.session_state.app_state.current_step == 5:
                 ax1.tick_params(axis='x', rotation=45)
                 ax1.grid(True, alpha=0.3, axis='y')
                 
+                # Add value labels on bars
                 for bar, area in zip(bars1, areas):
                     height = bar.get_height()
                     ax1.text(bar.get_x() + bar.get_width()/2., height,
                             f'{area:.2e}',
                             ha='center', va='bottom', fontsize=8, rotation=0)
                 
+                # 2. Bar chart of fractions (top right)
                 ax2 = plt.subplot(2, 2, 2)
                 bars2 = ax2.bar(peaks, fractions, color=colors, edgecolor='black', alpha=0.7)
                 ax2.set_xlabel('Peak', fontweight='bold')
@@ -2987,18 +2661,21 @@ elif st.session_state.app_state.current_step == 5:
                 ax2.tick_params(axis='x', rotation=45)
                 ax2.grid(True, alpha=0.3, axis='y')
                 
+                # Add value labels on bars
                 for bar, frac in zip(bars2, fractions):
                     height = bar.get_height()
                     ax2.text(bar.get_x() + bar.get_width()/2., height,
                             f'{frac:.1f}%',
                             ha='center', va='bottom', fontsize=8)
                 
+                # 3. Pie chart (bottom left)
                 ax3 = plt.subplot(2, 2, 3)
                 wedges, texts, autotexts = ax3.pie(fractions, labels=peaks, autopct='%1.1f%%',
                        colors=colors, startangle=90,
                        textprops={'fontweight': 'bold'})
                 ax3.set_title('Area Distribution - Pie Chart', fontweight='bold')
                 
+                # 4. Horizontal bar chart (bottom right)
                 ax4 = plt.subplot(2, 2, 4)
                 y_pos = np.arange(len(peaks))
                 bars4 = ax4.barh(y_pos, fractions, color=colors, edgecolor='black', alpha=0.7)
@@ -3008,6 +2685,7 @@ elif st.session_state.app_state.current_step == 5:
                 ax4.set_title('Peak Fractions - Horizontal View', fontweight='bold')
                 ax4.grid(True, alpha=0.3, axis='x')
                 
+                # Add value labels
                 for bar, frac in zip(bars4, fractions):
                     width = bar.get_width()
                     ax4.text(width + 0.5, bar.get_y() + bar.get_height()/2.,
@@ -3018,6 +2696,7 @@ elif st.session_state.app_state.current_step == 5:
                 st.pyplot(fig)
                 plt.close()
             
+            # Summary statistics row
             st.markdown("---")
             st.subheader("Summary Statistics")
             
@@ -3045,13 +2724,17 @@ elif st.session_state.app_state.current_step == 5:
             col1, col2 = st.columns(2)
             
             with col1:
+                # Find maximum amplitude for normalization
                 max_amp = max([c['amp'] for c in deconv.components])
                 
+                # Create normalized plot
                 fig_norm, ax_norm = plt.subplots(figsize=(10, 6))
                 
+                # Apply scales
                 if deconv.use_log_x:
                     ax_norm.set_xscale('log')
                 
+                # Generate dense x for smooth curves
                 if deconv.use_log_x:
                     x_min = np.maximum(np.min(deconv.x_linear[deconv.x_linear>0]), np.finfo(float).eps)
                     x_max = np.max(deconv.x_linear)
@@ -3061,18 +2744,22 @@ elif st.session_state.app_state.current_step == 5:
                     x_dense = np.linspace(np.min(deconv.x_linear), np.max(deconv.x_linear), 2000)
                     x_dense_log = x_dense
                 
+                # Plot normalized components
                 colors = plt.cm.Set3(np.linspace(0, 1, len(deconv.components)))
                 for c, color in zip(deconv.components, colors):
                     y_component_norm = GaussianModel.gaussian(x_dense_log, c['amp_norm'], 
                                                             c['cen_log'], c['sigma_log']) 
                     y_component_norm = y_component_norm * deconv.y_max / max_amp
                     
+                    # Fill under Gaussian
                     ax_norm.fill_between(x_dense, 0, y_component_norm, 
                                         color=color, alpha=0.3, linewidth=0)
                     
+                    # Plot line
                     ax_norm.plot(x_dense, y_component_norm, '-', color=color, linewidth=2,
                                label=f'Peak {c["id"]}: {c["fraction_percent"]:.1f}%', zorder=2)
                 
+                # Plot normalized total fit
                 if deconv.baseline_method != 'none' and deconv.baseline_params:
                     n_peaks = len(deconv.components)
                     peak_params = []
@@ -3088,16 +2775,19 @@ elif st.session_state.app_state.current_step == 5:
                 
                 ax_norm.plot(x_dense, y_total_norm, 'r--', linewidth=2, label='Total Fit', zorder=3)
                 
+                # Plot original data (normalized)
                 y_original_norm = deconv.y_original / max_amp
                 ax_norm.scatter(deconv.x_linear, y_original_norm, 
                                s=10, alpha=0.5, color='black', label='Data', zorder=1)
                 
+                # Labels and title
                 x_label = 'X' + (' (log scale)' if deconv.use_log_x else '')
                 y_label = 'Normalized Intensity'
                 ax_norm.set_xlabel(x_label, fontsize=12, fontweight='bold')
                 ax_norm.set_ylabel(y_label, fontsize=12, fontweight='bold')
                 ax_norm.set_title('Deconvolution Result - Normalized to Max Peak = 1', fontsize=14, fontweight='bold')
                 
+                # Add quality metrics
                 if deconv.quality_metrics:
                     metrics_text = f"R² = {deconv.quality_metrics.get('R²', 0):.4f}\n"
                     metrics_text += f"RMSE = {deconv.quality_metrics.get('RMSE', 0):.2e}"
@@ -3108,6 +2798,7 @@ elif st.session_state.app_state.current_step == 5:
                 ax_norm.legend(loc='upper right', fontsize=8, frameon=True, edgecolor='black')
                 ax_norm.grid(True, alpha=0.3, linestyle='--')
                 
+                # Scientific styling
                 ax_norm.spines['top'].set_visible(True)
                 ax_norm.spines['right'].set_visible(True)
                 ax_norm.spines['bottom'].set_linewidth(1)
@@ -3124,6 +2815,7 @@ elif st.session_state.app_state.current_step == 5:
                 
                 fig_comp_norm, ax_comp_norm = plt.subplots(figsize=(10, 6))
                 
+                # Plot all normalized components on the same axes without fill
                 colors = plt.cm.Set3(np.linspace(0, 1, len(deconv.components)))
                 for c, color in zip(deconv.components, colors):
                     y_component_norm = GaussianModel.gaussian(x_dense_log, c['amp_norm'], 
@@ -3133,6 +2825,7 @@ elif st.session_state.app_state.current_step == 5:
                     ax_comp_norm.plot(x_dense, y_component_norm, '-', color=color, linewidth=2,
                                     label=f'Peak {c["id"]} (center: {c["cen_linear"]:.2e})')
                 
+                # Add vertical lines at peak centers
                 for c in deconv.components:
                     ax_comp_norm.axvline(x=c['cen_linear'], color='gray', linestyle=':', alpha=0.5)
                 
@@ -3148,6 +2841,7 @@ elif st.session_state.app_state.current_step == 5:
                 st.pyplot(fig_comp_norm)
                 plt.close()
             
+            # Table of normalized values
             st.subheader("Normalized Parameters")
             norm_data = []
             for c in deconv.components:
@@ -3165,6 +2859,7 @@ elif st.session_state.app_state.current_step == 5:
         with tab3:
             st.subheader("Results Table - Complete Dataset")
             
+            # Main results table
             data = []
             for c in deconv.components:
                 data.append({
@@ -3182,6 +2877,7 @@ elif st.session_state.app_state.current_step == 5:
             
             df = pd.DataFrame(data)
             
+            # Format for display
             display_df = df.copy()
             for col in ['Center', 'Amplitude', 'Area']:
                 display_df[col] = display_df[col].apply(lambda x: f"{x:.4e}")
@@ -3193,6 +2889,7 @@ elif st.session_state.app_state.current_step == 5:
             
             st.dataframe(display_df, use_container_width=True)
             
+            # Download button for raw data
             csv = df.to_csv(index=False)
             st.download_button(
                 label="📥 Download Raw Data (CSV)",
@@ -3204,6 +2901,7 @@ elif st.session_state.app_state.current_step == 5:
             
             st.markdown("---")
             
+            # Baseline info if used
             if deconv.baseline_method != 'none' and deconv.baseline_params:
                 st.subheader("Baseline Parameters")
                 baseline_df = pd.DataFrame([{
@@ -3214,6 +2912,7 @@ elif st.session_state.app_state.current_step == 5:
             
             st.markdown("---")
             
+            # Quality metrics in columns
             st.subheader("Quality Metrics")
             metrics = deconv.quality_metrics
             
@@ -3243,6 +2942,7 @@ elif st.session_state.app_state.current_step == 5:
             col1, col2 = st.columns(2)
             
             with col1:
+                # Export peaks to CSV
                 if st.button("📥 Export Peaks to CSV", use_container_width=True):
                     df_peaks = pd.DataFrame([{
                         'Peak_ID': c['id'],
@@ -3267,7 +2967,9 @@ elif st.session_state.app_state.current_step == 5:
                         use_container_width=True
                     )
                 
+                # Export fitting data
                 if 'Residuals' in deconv.quality_metrics:
+                    # Reconstruct fit with baseline if needed
                     if deconv.baseline_method != 'none' and deconv.baseline_params:
                         n_peaks = len(deconv.components)
                         peak_params = []
@@ -3281,6 +2983,7 @@ elif st.session_state.app_state.current_step == 5:
                     else:
                         fit_y_norm = deconv.fit_y_norm
                     
+                    # Generate normalized fit data
                     max_amp = max([c['amp'] for c in deconv.components])
                     
                     df_fit = pd.DataFrame({
@@ -3303,6 +3006,7 @@ elif st.session_state.app_state.current_step == 5:
                     )
             
             with col2:
+                # Export report
                 if st.button("📄 Export Detailed Report", use_container_width=True):
                     max_amp = max([c['amp'] for c in deconv.components])
                     
@@ -3368,6 +3072,7 @@ Maximum amplitude (for normalization): {max_amp:.6e}
             
             st.markdown("---")
             
+            # Export figures
             st.subheader("Export Figures")
             
             col_fig1, col_fig2 = st.columns(2)
@@ -3383,6 +3088,7 @@ Maximum amplitude (for normalization): {max_amp:.6e}
                         ax=ax
                     )
                     
+                    # Save to buffer
                     buf = io.BytesIO()
                     fig.savefig(buf, format='png', dpi=300, bbox_inches='tight')
                     buf.seek(0)
@@ -3441,47 +3147,6 @@ Maximum amplitude (for normalization): {max_amp:.6e}
                         mime="image/png",
                         use_container_width=True
                     )
-        
-        with tab5:
-            st.subheader("Baseline Correction Visualization")
-            
-            if hasattr(deconv, 'baseline_corrected') and deconv.baseline_corrected:
-                fig = plot_baseline_quality(
-                    deconv.x_linear,
-                    deconv.y_original_raw,
-                    deconv.baseline_curve,
-                    deconv.y_original
-                )
-                st.pyplot(fig)
-                plt.close()
-                
-                st.subheader("Correction Information")
-                info = deconv.baseline_info
-                if info:
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        st.metric("Method", deconv.baseline_method)
-                        if 'lam' in info:
-                            st.metric("Smoothing (λ)", f"{info['lam']:.2e}")
-                    with col2:
-                        if 'p' in info:
-                            st.metric("Asymmetry (p)", f"{info['p']:.3f}")
-                        if 'half_window' in info:
-                            st.metric("Window size", info['half_window'])
-                
-                metrics = BaselineCorrector.get_quality_metrics(deconv.y_original_raw, deconv.baseline_curve)
-                st.subheader("Correction Quality Metrics")
-                col_m1, col_m2, col_m3, col_m4 = st.columns(4)
-                with col_m1:
-                    st.metric("RMSE", f"{metrics.get('rmse', 0):.3e}")
-                with col_m2:
-                    st.metric("MAE", f"{metrics.get('mae', 0):.3e}")
-                with col_m3:
-                    st.metric("Skewness", f"{metrics.get('skewness', 0):.3f}")
-                with col_m4:
-                    st.metric("Negative %", f"{metrics.get('negative_fraction', 0):.1f}%")
-            else:
-                st.info("No baseline correction was applied to this data.")
             
             st.markdown("---")
             
