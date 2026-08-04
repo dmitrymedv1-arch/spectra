@@ -2306,6 +2306,13 @@ elif st.session_state.app_state.current_step == 2.5:
                     st.session_state.app_state.baseline_params = params
                     
                     st.session_state.app_state.raw_y = y_corrected
+                    st.session_state.app_state.raw_x = x_sorted
+                    
+                    # Обновляем исходные данные для корректного отображения
+                    if hasattr(st.session_state.app_state, 'original_x'):
+                        st.session_state.app_state.original_x = x_sorted.copy()
+                    if hasattr(st.session_state.app_state, 'original_y'):
+                        st.session_state.app_state.original_y = y_corrected.copy()
                     
                     st.success(f"Baseline correction applied using {method_key}")
                     st.session_state.app_state.preview_baseline = True
@@ -2317,6 +2324,14 @@ elif st.session_state.app_state.current_step == 2.5:
         if st.session_state.app_state.preview_baseline:
             x_range = st.session_state.app_state.raw_x
             y_range = st.session_state.app_state.raw_y
+            # Убеждаемся что baseline и corrected имеют ту же длину
+            if hasattr(st.session_state.app_state, 'baseline_curve') and st.session_state.app_state.baseline_curve is not None:
+                if len(st.session_state.app_state.baseline_curve) != len(x_range):
+                    # Пересчитываем baseline для текущего x_range
+                    if st.session_state.app_state.baseline_corrector is not None:
+                        temp_corrected, temp_baseline, temp_info = st.session_state.app_state.baseline_corrector.correct(x_range, y_range)
+                        st.session_state.app_state.baseline_curve = temp_baseline
+                        st.session_state.app_state.baseline_corrected_y = temp_corrected
             
             if hasattr(st.session_state.app_state, 'baseline_curve') and st.session_state.app_state.baseline_curve is not None:
                 baseline = st.session_state.app_state.baseline_curve
