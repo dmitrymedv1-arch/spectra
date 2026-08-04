@@ -2142,6 +2142,10 @@ elif st.session_state.app_state.current_step == 2:
                 st.rerun()
         with col_b:
             if st.button("⏭️ Skip Baseline", use_container_width=True):
+                # Сохраняем выбранные масштабы перед переходом
+                st.session_state.app_state.use_log_x = use_log_x
+                st.session_state.app_state.use_log_y = use_log_y
+                
                 x_range, y_range = DataParser.apply_range_selection(
                     st.session_state.app_state.raw_x,
                     st.session_state.app_state.raw_y,
@@ -2155,6 +2159,10 @@ elif st.session_state.app_state.current_step == 2:
                 st.rerun()
         with col_c:
             if st.button("✅ Apply & Continue", type="primary", use_container_width=True):
+                # Сохраняем выбранные масштабы перед переходом
+                st.session_state.app_state.use_log_x = use_log_x  # use_log_x из чекбокса
+                st.session_state.app_state.use_log_y = use_log_y  # use_log_y из чекбокса
+                
                 x_range, y_range = DataParser.apply_range_selection(
                     st.session_state.app_state.raw_x,
                     st.session_state.app_state.raw_y,
