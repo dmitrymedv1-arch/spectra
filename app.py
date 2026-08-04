@@ -2383,6 +2383,10 @@ elif st.session_state.app_state.current_step == 2.5:
         with col_apply:
             if st.button("✅ Apply Correction", type="primary", use_container_width=True):
                 with st.spinner("Applying baseline correction..."):
+                    # Убеждаемся, что масштабы сохранены
+                    use_log_x = st.session_state.app_state.use_log_x
+                    use_log_y = st.session_state.app_state.use_log_y
+                    
                     if method_key == 'none':
                         corrector = BaselineCorrector('none')
                         y_corrected = y.copy()
@@ -2419,6 +2423,9 @@ elif st.session_state.app_state.current_step == 2.5:
                     st.session_state.app_state.baseline_info = info
                     
                     st.session_state.app_state.raw_y = y_corrected
+                    # Явно сохраняем масштабы
+                    st.session_state.app_state.use_log_x = use_log_x
+                    st.session_state.app_state.use_log_y = use_log_y
                     
                     st.success(f"Baseline correction applied using {method_key}")
                     st.session_state.app_state.preview_baseline = True
@@ -2437,7 +2444,14 @@ elif st.session_state.app_state.current_step == 2.5:
                 
                 fig, axes = plt.subplots(3, 1, figsize=(10, 12))
                 
+                # === ГРАФИК 1: Исходные данные с базовой линией ===
                 ax1 = axes[0]
+                # Применяем логарифмические масштабы
+                if st.session_state.app_state.use_log_x:
+                    ax1.set_xscale('log')
+                if st.session_state.app_state.use_log_y:
+                    ax1.set_yscale('log')
+                
                 ax1.plot(x_range, y_range, 'b-', label='Original data', alpha=0.7, linewidth=1)
                 ax1.plot(x_range, baseline, 'r-', label='Baseline', linewidth=2)
                 ax1.fill_between(x_range, baseline, y_range, 
@@ -2447,12 +2461,20 @@ elif st.session_state.app_state.current_step == 2.5:
                                 where=(y_range < baseline), color='red', alpha=0.2,
                                 label='Below baseline')
                 ax1.set_title('Original Data with Baseline')
-                ax1.set_xlabel('X')
+                x_label = 'X' + (' (log scale)' if st.session_state.app_state.use_log_x else '')
+                ax1.set_xlabel(x_label)
                 ax1.set_ylabel('Intensity')
                 ax1.legend(loc='upper right')
                 ax1.grid(True, alpha=0.3)
                 
+                # === ГРАФИК 2: Скорректированные данные ===
                 ax2 = axes[1]
+                # Применяем логарифмические масштабы
+                if st.session_state.app_state.use_log_x:
+                    ax2.set_xscale('log')
+                if st.session_state.app_state.use_log_y:
+                    ax2.set_yscale('log')
+                
                 ax2.plot(x_range, y_corrected, 'g-', label='Corrected', linewidth=1.5)
                 ax2.axhline(y=0, color='k', linestyle='-', alpha=0.3, linewidth=0.5)
                 ax2.fill_between(x_range, 0, y_corrected, 
@@ -2460,17 +2482,26 @@ elif st.session_state.app_state.current_step == 2.5:
                 ax2.fill_between(x_range, 0, y_corrected, 
                                 where=(y_corrected < 0), color='red', alpha=0.2)
                 ax2.set_title('Baseline-Corrected Data')
-                ax2.set_xlabel('X')
+                x_label = 'X' + (' (log scale)' if st.session_state.app_state.use_log_x else '')
+                ax2.set_xlabel(x_label)
                 ax2.set_ylabel('Intensity')
                 ax2.legend(loc='upper right')
                 ax2.grid(True, alpha=0.3)
                 
+                # === ГРАФИК 3: Остатки ===
                 ax3 = axes[2]
+                # Применяем логарифмические масштабы
+                if st.session_state.app_state.use_log_x:
+                    ax3.set_xscale('log')
+                if st.session_state.app_state.use_log_y:
+                    ax3.set_yscale('log')
+                
                 residuals = y_range - baseline
                 ax3.plot(x_range, residuals, 'b-', label='Residuals', alpha=0.7)
                 ax3.axhline(y=0, color='r', linestyle='--', alpha=0.5)
                 ax3.set_title('Residuals (Data - Baseline)')
-                ax3.set_xlabel('X')
+                x_label = 'X' + (' (log scale)' if st.session_state.app_state.use_log_x else '')
+                ax3.set_xlabel(x_label)
                 ax3.set_ylabel('Residual')
                 ax3.legend(loc='upper right')
                 ax3.grid(True, alpha=0.3)
