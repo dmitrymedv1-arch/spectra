@@ -2288,11 +2288,14 @@ elif st.session_state.app_state.current_step == 2.5:
                     else:
                         corrector = BaselineCorrector(method_key, **params)
                     
-                    x_sorted, y_sorted = DataParser.apply_range_selection(
-                        x, y,
-                        st.session_state.app_state.point_range_start,
-                        st.session_state.app_state.point_range_end
-                    )
+                    if len(x) == len(st.session_state.app_state.original_x) and st.session_state.app_state.point_range_start is not None:
+                        x_sorted, y_sorted = DataParser.apply_range_selection(
+                            x, y,
+                            st.session_state.app_state.point_range_start,
+                            st.session_state.app_state.point_range_end
+                        )
+                    else:
+                        x_sorted, y_sorted = x, y
                     
                     y_corrected, baseline, info = corrector.correct(x_sorted, y_sorted)
                     
