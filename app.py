@@ -2321,6 +2321,16 @@ elif st.session_state.app_state.current_step == 2.5:
                 
                 fig, axes = plt.subplots(3, 1, figsize=(10, 12))
                 
+                # Применяем логарифмические шкалы если они выбраны
+                if st.session_state.app_state.use_log_x:
+                    axes[0].set_xscale('log')
+                    axes[1].set_xscale('log')
+                    axes[2].set_xscale('log')
+                if st.session_state.app_state.use_log_y:
+                    axes[0].set_yscale('log')
+                    axes[1].set_yscale('log')
+                    axes[2].set_yscale('log')
+                
                 ax1 = axes[0]
                 ax1.plot(x_range, y_range, 'b-', label='Original data', alpha=0.7, linewidth=1)
                 ax1.plot(x_range, baseline, 'r-', label='Baseline', linewidth=2)
@@ -2331,8 +2341,10 @@ elif st.session_state.app_state.current_step == 2.5:
                                 where=(y_range < baseline), color='red', alpha=0.2,
                                 label='Below baseline')
                 ax1.set_title('Original Data with Baseline')
-                ax1.set_xlabel('X')
-                ax1.set_ylabel('Intensity')
+                x_label = 'X' + (' (log scale)' if st.session_state.app_state.use_log_x else '')
+                y_label = 'Intensity' + (' (log scale)' if st.session_state.app_state.use_log_y else '')
+                ax1.set_xlabel(x_label)
+                ax1.set_ylabel(y_label)
                 ax1.legend(loc='upper right')
                 ax1.grid(True, alpha=0.3)
                 
@@ -2344,8 +2356,8 @@ elif st.session_state.app_state.current_step == 2.5:
                 ax2.fill_between(x_range, 0, y_corrected, 
                                 where=(y_corrected < 0), color='red', alpha=0.2)
                 ax2.set_title('Baseline-Corrected Data')
-                ax2.set_xlabel('X')
-                ax2.set_ylabel('Intensity')
+                ax2.set_xlabel(x_label)
+                ax2.set_ylabel(y_label)
                 ax2.legend(loc='upper right')
                 ax2.grid(True, alpha=0.3)
                 
@@ -2354,7 +2366,7 @@ elif st.session_state.app_state.current_step == 2.5:
                 ax3.plot(x_range, residuals, 'b-', label='Residuals', alpha=0.7)
                 ax3.axhline(y=0, color='r', linestyle='--', alpha=0.5)
                 ax3.set_title('Residuals (Data - Baseline)')
-                ax3.set_xlabel('X')
+                ax3.set_xlabel(x_label)
                 ax3.set_ylabel('Residual')
                 ax3.legend(loc='upper right')
                 ax3.grid(True, alpha=0.3)
